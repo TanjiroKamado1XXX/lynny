@@ -23,7 +23,7 @@ Nyx turns what plays on your PC into a reactive neon border, featuring a fullscr
 
 To run from source:
 ```bash
-git clone https://github.com
+git clone [https://github.com](https://github.com/TanjiroKamado1XXX/lynny)
 cd lynny
 dotnet run --project LmenV2.csproj
 ```
