@@ -1,8 +1,11 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Win32;
+using LmenV2.Helpers;
 using LmenV2.Services;
 using LmenV2.Tray;
 using LmenV2.Views;
@@ -18,7 +21,13 @@ namespace LmenV2
         private TrayIconManager? _trayManager;
 
         private FullscreenVisualizerWindow? _fullscreenWindow;
+        private SecondaryLyricsWindow? _secondaryLyricsWindow;
         private DesktopOverlayWindow? _overlayWindow;
+        private bool _dualDisplayActive;
+        private bool _lastDualDisplaySetting;
+        private bool _lastSwapDualDisplaysSetting;
+        private bool _settingsEventsSubscribed;
+        private bool _displayEventsSubscribed;
 
         public static void Log(string msg)
         {
@@ -135,6 +144,13 @@ namespace LmenV2
 
             try
             {
+                _lastDualDisplaySetting = SettingsService.Instance.DualDisplayModeEnabled;
+                _lastSwapDualDisplaysSetting = SettingsService.Instance.SwapDualDisplays;
+                SettingsService.Instance.SettingsChanged += OnSettingsChanged;
+                _settingsEventsSubscribed = true;
+                SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+                _displayEventsSubscribed = true;
+
                 Log("Initializing MediaSessionService...");
                 _mediaService = new MediaSessionService();
 
@@ -179,16 +195,33 @@ namespace LmenV2
                 if (_fullscreenWindow == null)
                 {
                     _fullscreenWindow = new FullscreenVisualizerWindow(_mediaService!, _audioService!);
+                    AttachPresentationWindow(_fullscreenWindow);
+                    _fullscreenWindow.SecondaryLyricsToggleRequested += ToggleSecondaryLyrics;
+                    _fullscreenWindow.SecondaryFullscreenToggleRequested += ToggleSecondaryFullscreen;
 
                     // The window can disappear without the app exiting (Alt+F4 while it is
                     // focused). Without clearing the reference, the next tray click would
                     // call Show() on a closed Window and throw
                     // "Cannot set Visibility or call Show/Activate after window has closed".
-                    _fullscreenWindow.Closed += (s, e) => _fullscreenWindow = null;
+                    _fullscreenWindow.Closed += (s, e) =>
+                    {
+                        if (s is FullscreenVisualizerWindow window)
+                        {
+                            DetachPresentationWindow(window);
+                            window.SecondaryLyricsToggleRequested -= ToggleSecondaryLyrics;
+                            window.SecondaryFullscreenToggleRequested -= ToggleSecondaryFullscreen;
+                        }
+                        _fullscreenWindow = null;
+                        _dualDisplayActive = false;
+                        CloseSecondaryLyricsWindow();
+                        UpdateOverlayRendering();
+                    };
                 }
 
                 _fullscreenWindow.Show();
                 _fullscreenWindow.Activate();
+                Dispatcher.BeginInvoke(new Action(ApplyDualDisplayMode));
+                UpdateOverlayRendering();
             });
         }
 
@@ -211,7 +244,209 @@ namespace LmenV2
 
                 _overlayWindow.Show();
                 _overlayWindow.EnsureTaskbarAboveOverlay();
+                ApplyDualDisplayMode();
+                UpdateOverlayRendering();
             });
+        }
+
+        private void AttachPresentationWindow(Window window)
+        {
+            window.IsVisibleChanged += OnPresentationWindowVisibilityChanged;
+            window.LocationChanged += OnPresentationWindowChanged;
+            window.SizeChanged += OnPresentationWindowSizeChanged;
+            window.StateChanged += OnPresentationWindowChanged;
+        }
+
+        private void DetachPresentationWindow(Window window)
+        {
+            window.IsVisibleChanged -= OnPresentationWindowVisibilityChanged;
+            window.LocationChanged -= OnPresentationWindowChanged;
+            window.SizeChanged -= OnPresentationWindowSizeChanged;
+            window.StateChanged -= OnPresentationWindowChanged;
+        }
+
+        private void OnPresentationWindowVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+            UpdateOverlayRendering();
+
+        private void OnPresentationWindowChanged(object? sender, EventArgs e) =>
+            UpdateOverlayRendering();
+
+        private void OnPresentationWindowSizeChanged(object sender, SizeChangedEventArgs e) =>
+            UpdateOverlayRendering();
+
+        private void UpdateOverlayRendering()
+        {
+            if (_overlayWindow == null) return;
+
+            var primaryMonitor = Win32Helper.GetMonitors().FirstOrDefault(monitor => monitor.IsPrimary);
+            bool coveredByVisualizer = primaryMonitor != null &&
+                _fullscreenWindow != null &&
+                _fullscreenWindow.IsVisible &&
+                _fullscreenWindow.WindowState != WindowState.Minimized &&
+                !_fullscreenWindow.IsRestoredMode &&
+                Win32Helper.IsWindowOnMonitor(_fullscreenWindow, primaryMonitor);
+            bool coveredBySecondaryLyrics = primaryMonitor != null &&
+                _secondaryLyricsWindow != null &&
+                _secondaryLyricsWindow.IsVisible &&
+                _secondaryLyricsWindow.WindowState != WindowState.Minimized &&
+                !_secondaryLyricsWindow.IsWindowedPresentation &&
+                Win32Helper.IsWindowOnMonitor(_secondaryLyricsWindow, primaryMonitor);
+
+            _overlayWindow.SetRenderingPaused(coveredByVisualizer || coveredBySecondaryLyrics);
+        }
+
+        private void OnSettingsChanged()
+        {
+            if (_hasExited || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                bool dualDisplayEnabled = SettingsService.Instance.DualDisplayModeEnabled;
+                bool swapDualDisplays = SettingsService.Instance.SwapDualDisplays;
+                if (_lastDualDisplaySetting == dualDisplayEnabled &&
+                    _lastSwapDualDisplaysSetting == swapDualDisplays)
+                {
+                    return;
+                }
+
+                _lastDualDisplaySetting = dualDisplayEnabled;
+                _lastSwapDualDisplaysSetting = swapDualDisplays;
+                ApplyDualDisplayMode();
+            }));
+        }
+
+        private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+        {
+            if (!_hasExited && !Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+            {
+                Dispatcher.BeginInvoke(new Action(ApplyDualDisplayMode));
+            }
+        }
+
+        private void ApplyDualDisplayMode()
+        {
+            if (_fullscreenWindow == null)
+            {
+                CloseSecondaryLyricsWindow();
+                _dualDisplayActive = false;
+                UpdateOverlayRendering();
+                return;
+            }
+
+            var monitors = Win32Helper.GetMonitors();
+            bool visualizerVisible = _fullscreenWindow.IsVisible &&
+                (_overlayWindow == null || !_overlayWindow.IsVisible);
+
+            if (!visualizerVisible || !SettingsService.Instance.DualDisplayModeEnabled || monitors.Count < 2)
+            {
+                bool wasActive = _dualDisplayActive;
+                _dualDisplayActive = false;
+                CloseSecondaryLyricsWindow();
+                _fullscreenWindow.SetDualDisplayPresentation(false);
+                if (wasActive && monitors.Count > 0 && _fullscreenWindow.IsVisible)
+                {
+                    var primary = monitors.FirstOrDefault(monitor => monitor.IsPrimary) ?? monitors[0];
+                    TryPositionVisualizerOnMonitor(_fullscreenWindow, primary, "single display restore");
+                }
+                UpdateOverlayRendering();
+                return;
+            }
+
+            var primaryMonitor = monitors.FirstOrDefault(monitor => monitor.IsPrimary) ?? monitors[0];
+            var secondaryMonitor = monitors.First(monitor => monitor.DeviceName != primaryMonitor.DeviceName);
+            DisplayMonitor coverMonitor = SettingsService.Instance.SwapDualDisplays
+                ? secondaryMonitor
+                : primaryMonitor;
+            DisplayMonitor lyricsMonitor = SettingsService.Instance.SwapDualDisplays
+                ? primaryMonitor
+                : secondaryMonitor;
+
+            try
+            {
+                _fullscreenWindow.SetDualDisplayPresentation(true, coverMonitor);
+                if (_secondaryLyricsWindow == null)
+                {
+                    _secondaryLyricsWindow = new SecondaryLyricsWindow(_fullscreenWindow, _mediaService!, _audioService!, lyricsMonitor);
+                    AttachPresentationWindow(_secondaryLyricsWindow);
+                    _secondaryLyricsWindow.ExitRequested += OnSecondaryLyricsExitRequested;
+                    _secondaryLyricsWindow.Closed += OnSecondaryLyricsClosed;
+                }
+
+                _secondaryLyricsWindow.SetMonitor(lyricsMonitor);
+                if (!_secondaryLyricsWindow.IsVisible)
+                {
+                    _secondaryLyricsWindow.Show();
+                }
+
+                _dualDisplayActive = true;
+                UpdateOverlayRendering();
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                Log($"[Dual display placement] {ex.Message}");
+                _dualDisplayActive = false;
+                CloseSecondaryLyricsWindow();
+                _fullscreenWindow.SetDualDisplayPresentation(false);
+                var fallbackMonitor = Win32Helper.GetMonitors().FirstOrDefault(monitor => monitor.IsPrimary);
+                if (fallbackMonitor != null && _fullscreenWindow.IsVisible)
+                {
+                    TryPositionVisualizerOnMonitor(_fullscreenWindow, fallbackMonitor, "dual display fallback placement");
+                }
+                UpdateOverlayRendering();
+            }
+        }
+
+        private static void TryPositionVisualizerOnMonitor(
+            FullscreenVisualizerWindow window,
+            DisplayMonitor monitor,
+            string operation)
+        {
+            try
+            {
+                window.MoveToMonitor(monitor);
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                Log($"[{operation}] {ex.Message}");
+            }
+        }
+
+        private void OnSecondaryLyricsExitRequested()
+        {
+            SettingsService.Instance.DualDisplayModeEnabled = false;
+        }
+
+        private void OnSecondaryLyricsClosed(object? sender, EventArgs e)
+        {
+            if (sender is SecondaryLyricsWindow window)
+            {
+                DetachPresentationWindow(window);
+                window.ExitRequested -= OnSecondaryLyricsExitRequested;
+            }
+            if (ReferenceEquals(sender, _secondaryLyricsWindow))
+            {
+                _secondaryLyricsWindow = null;
+            }
+            UpdateOverlayRendering();
+        }
+
+        private void CloseSecondaryLyricsWindow()
+        {
+            if (_secondaryLyricsWindow == null) return;
+            var window = _secondaryLyricsWindow;
+            _secondaryLyricsWindow = null;
+            window.ExitRequested -= OnSecondaryLyricsExitRequested;
+            window.Closed -= OnSecondaryLyricsClosed;
+            window.CloseFromOwner();
+        }
+
+        private void ToggleSecondaryLyrics()
+        {
+            _secondaryLyricsWindow?.ToggleLyricsVisibilityFromPrimary();
+        }
+
+        private void ToggleSecondaryFullscreen()
+        {
+            _secondaryLyricsWindow?.ToggleFullscreenFromPrimary();
         }
 
         public bool IsOverlayModeActive =>
@@ -248,12 +483,23 @@ namespace LmenV2
             _hasExited = true;
 
             Log("ExitApp called");
+            if (_settingsEventsSubscribed)
+            {
+                SettingsService.Instance.SettingsChanged -= OnSettingsChanged;
+                _settingsEventsSubscribed = false;
+            }
+            if (_displayEventsSubscribed)
+            {
+                SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                _displayEventsSubscribed = false;
+            }
 
             // Windows first: their OnClosed handlers unsubscribe from the render loop and
             // from service events, which must happen before the services go away.
             try
             {
                 _fullscreenWindow?.Close();
+                CloseSecondaryLyricsWindow();
                 _overlayWindow?.Close();
             }
             catch (Exception ex)
@@ -265,7 +511,6 @@ namespace LmenV2
             try { _mediaService?.Dispose(); } catch (Exception ex) { Log($"[ExitApp media] {ex.Message}"); }
             try { _trayManager?.Dispose(); } catch (Exception ex) { Log($"[ExitApp tray] {ex.Message}"); }
             try { Services.SystemVolumeService.Instance.Dispose(); } catch (Exception ex) { Log($"[ExitApp volume] {ex.Message}"); }
-
             try
             {
                 _showWindowEvent?.Set();

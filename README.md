@@ -1,10 +1,10 @@
-# Lmen v2 (Lumen for Windows)
+# Nyx
 
 **Ambient, audio-reactive screen-edge lighting and timed lyrics for Windows.**
 
-Lmen v2 turns whatever is playing on your PC into light around the edges of your display. It reads the current track from Windows media controls, extracts a palette from the album artwork, and renders an animated neon border that moves with the music. A fullscreen visualizer, a click-through desktop overlay, motion album artwork, and word-synced lyrics are built in.
+Nyx turns whatever is playing on your PC into light around the edges of your display. It reads the current track from Windows media controls, extracts a palette from the album artwork, and renders an animated neon border that moves with the music. A fullscreen visualizer, a click-through desktop overlay, motion album artwork, and word-synced lyrics are built in.
 
-Inspired by the macOS ambient player **Lumen**, rebuilt from scratch for Windows.
+An ambient Windows visualizer, redesigned and maintained by **Nyx**.
 
 ## Features
 
@@ -13,13 +13,19 @@ Inspired by the macOS ambient player **Lumen**, rebuilt from scratch for Windows
 - Album-art palette extraction with vibrance enhancement and a grayscale fallback.
 - Rotating light, breathing animation, adjustable brightness, spread, and backdrop bloom.
 - Audio-reactive pulse driven by WASAPI loopback capture.
+- Optional beat-reactive Chromatic Split shader for lyrics, artwork/backdrop, or the full visualizer stage.
 - Built-in color presets and a screen color dropper for per-track custom colors.
 - Reactive glow that tints the artwork, cards, and player controls from the live beam color and pulse.
 
 ### Fullscreen visualizer
 - Large artwork, blurred cover backdrop, and a dark ambient stage.
+- Selectable blurred-artwork, audio-reactive mesh, or blended backdrop, with palette transitions and adjustable motion, reactivity, and vignette.
 - Play/pause, previous/next, shuffle, repeat, seek bar, and master volume.
 - Windowed or borderless fullscreen, with taskbar auto-reveal on hover.
+- The track row keeps only Cover, Page, and Lyrics controls; dual-display split mode places album artwork on one monitor and a synced lyrics stage on another, with DPI-aware placement, hot-plug fallback, and display swapping.
+- The secondary lyrics HUD provides playback, style, translation/language, romanization, and sync-offset controls, auto-hides when idle, and has independently configurable audio-reactive edge glow.
+- Per-display settings popups independently adjust brightness, contrast, backdrop dimming, glow, and audio reactivity; secondary settings can be copied from the primary display or reset.
+- Optional low-latency graphics mode reduces artwork blur resolution, video blur radius, and kinetic text effects while retaining the high-performance GPU preference.
 - Fullscreen motion mode with animated covers, a blurred video backdrop, and an auto-hiding transport bar with seek, shuffle, repeat, and volume.
 - Live glow controls with color presets, a screen dropper, brightness/spread sliders, and a reactive-glow toggle.
 - Frosted-glass controls and a reactive glow pill that dims when paused.
@@ -95,30 +101,32 @@ The published app is written under `bin\Release\net8.0-windows10.0.19041.0\win-x
 | `F11` | Toggle windowed / fullscreen |
 | `Esc` | Close the current layer; from the player, switch to the desktop overlay |
 
+On the secondary lyrics display, `Esc` exits dual-display mode, `F11` toggles windowed/fullscreen, `S` changes lyric style, and `L` shows or hides lyrics.
+
 Double-click the album art to enter fullscreen motion mode.
 
 ## Settings and local data
 
 | Path | Contents |
 |---|---|
-| `%APPDATA%\LmenV2\settings.json` | Glow, audio, lyrics, and motion artwork settings |
+| `%APPDATA%\LmenV2\settings.json` | Glow, audio, lyrics, motion artwork, Chromatic Split, and dual-display settings |
 | `%LOCALAPPDATA%\LmenV2\Lyrics` | Cached lyric provider responses |
 | `%LOCALAPPDATA%\LmenV2\LyricsTranslation` | Cached translations and romanizations |
 | `%LOCALAPPDATA%\Lmen\CanvasCache` | Downloaded motion artwork |
 
-Settings include glow brightness and spread, rotation speed, breathing amount, backdrop brightness, music reactivity, lyric beat effects, translation language, lyric offset, motion artwork on/off, Spotify Canvas priority, an optional Spotify `sp_dc` cookie, and an optional PaxSenix API key.
+Settings include primary and secondary display brightness, contrast, and backdrop dimming; display-specific glow brightness, spread, and audio reactivity; rotation speed, breathing amount, lyric beat effects, translation language, lyric offset, motion artwork on/off, Spotify Canvas priority, an optional Spotify `sp_dc` cookie, and an optional PaxSenix API key.
 
 ## Project layout
 
 | Path | Purpose |
 |---|---|
-| `App.xaml.cs` | Startup, single-instance handling, window and tray lifecycle |
+| `App.xaml.cs` | Startup, single-instance handling, display-change handling, and window/tray lifecycle |
 | `Rendering/` | Edge beam geometry, glow profiles, backdrop blur |
 | `Services/` | Media sessions, audio capture, color extraction, artwork, lyrics, settings |
-| `Views/` | Fullscreen visualizer, desktop overlay, and settings windows |
+| `Views/` | Fullscreen visualizer, secondary lyrics stage, desktop overlay, and settings windows |
 | `Tray/` | System tray icon and menu |
 | `Models/` | Track metadata and lyric timing models |
-| `Helpers/` | Win32 interop |
+| `Helpers/` | Win32 interop, monitor enumeration, and per-monitor DPI placement |
 
 ## Tech stack
 
@@ -131,6 +139,4 @@ Settings include glow brightness and spread, rotation speed, breathing amount, b
 
 ## Credits
 
-- Inspired by **Lumen (lmen)** for macOS.
-- Lyric presentation inspired by **BitChord** (Stage) and **Verci** (Fisheye Lens).
-- Built as an open, experimental Windows counterpart.
+- Designed and maintained by **Nyx**.

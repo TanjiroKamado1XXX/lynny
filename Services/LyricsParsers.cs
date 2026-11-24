@@ -17,14 +17,16 @@ namespace LmenV2.Services
         public long StartMs { get; set; }
         public long EndMs { get; set; }
         public string Raw { get; set; } = string.Empty;
+        public bool WordBoundaryAfter { get; set; }
 
         public TimedRun() { }
 
-        public TimedRun(long startMs, long endMs, string raw)
+        public TimedRun(long startMs, long endMs, string raw, bool wordBoundaryAfter = false)
         {
             StartMs = startMs;
             EndMs = endMs;
             Raw = raw ?? string.Empty;
+            WordBoundaryAfter = wordBoundaryAfter;
         }
     }
 
@@ -33,11 +35,20 @@ namespace LmenV2.Services
     /// </summary>
     public static class SyllableRuns
     {
-        public static List<LyricWord> WordsFromRuns(List<TimedRun> runs, bool spacingIsExplicit = false)
+        /// <param name="spacingIsExplicit">Compatibility parameter retained for existing callers.</param>
+        /// <param name="sourceText">Optional line text used to recover separators omitted from timed fragments.</param>
+        public static List<LyricWord> WordsFromRuns(
+            List<TimedRun> runs,
+            bool spacingIsExplicit = false,
+            string? sourceText = null)
         {
             if (runs == null || runs.Count == 0) return new List<LyricWord>();
 
-            bool glue = spacingIsExplicit || runs.Any(r => r.Raw.Any(char.IsWhiteSpace));
+            _ = spacingIsExplicit;
+            if (!string.IsNullOrWhiteSpace(sourceText))
+            {
+                AddSourceTextBoundaries(runs, sourceText);
+            }
 
             var words = new List<LyricWord>();
             var current = new StringBuilder();
@@ -45,7 +56,7 @@ namespace LmenV2.Services
             long start = 0L;
             long end = 0L;
 
-            void Flush()
+            void Flush(bool hasSpaceAfter = false)
             {
                 if (current.Length > 0)
                 {
@@ -56,26 +67,24 @@ namespace LmenV2.Services
                         StartTime = TimeSpan.FromMilliseconds(start),
                         EndTime = TimeSpan.FromMilliseconds(Math.Max(start, end)),
                         Text = text,
+                        HasSpaceAfter = hasSpaceAfter,
                         Syllables = LyricSyllable.Normalized(parts, text.Length)
                     });
+                }
+                else if (hasSpaceAfter && words.Count > 0)
+                {
+                    words[^1].HasSpaceAfter = true;
                 }
                 current.Clear();
                 parts.Clear();
             }
 
-            foreach (var run in runs)
+            void AppendToken(string token, TimedRun run)
             {
-                string content = run.Raw.Trim();
-                if (string.IsNullOrEmpty(content))
-                {
-                    Flush();
-                    continue;
-                }
-
-                bool joins = glue && current.Length > 0 && !char.IsWhiteSpace(run.Raw[0]) &&
-                             !IsUnspacedScript(current[current.Length - 1]) && !IsUnspacedScript(content[0]);
-
-                if (!joins) Flush();
+                bool joinsPrevious = current.Length > 0 &&
+                    !IsUnspacedScript(current[current.Length - 1]) &&
+                    !IsUnspacedScript(token[0]);
+                if (!joinsPrevious) Flush();
 
                 if (current.Length == 0)
                 {
@@ -84,19 +93,83 @@ namespace LmenV2.Services
                 }
 
                 int from = current.Length;
-                current.Append(content);
+                current.Append(token);
                 long runEnd = Math.Max(run.StartMs, run.EndMs);
                 parts.Add(new LyricSyllable(run.StartMs, runEnd, from, current.Length));
                 end = Math.Max(end, runEnd);
+            }
 
-                if (!glue || char.IsWhiteSpace(run.Raw[^1]))
+            foreach (var run in runs)
+            {
+                string raw = run.Raw ?? string.Empty;
+                int index = 0;
+                while (index < raw.Length)
                 {
-                    Flush();
+                    if (char.IsWhiteSpace(raw[index]))
+                    {
+                        Flush(hasSpaceAfter: true);
+                        index++;
+                        continue;
+                    }
+
+                    int tokenStart = index;
+                    while (index < raw.Length && !char.IsWhiteSpace(raw[index])) index++;
+                    AppendToken(raw.Substring(tokenStart, index - tokenStart), run);
                 }
+
+                if (run.WordBoundaryAfter) Flush(hasSpaceAfter: true);
             }
 
             Flush();
             return words;
+        }
+
+        private static void AddSourceTextBoundaries(List<TimedRun> runs, string sourceText)
+        {
+            var compactSource = new StringBuilder(sourceText.Length);
+            var sourcePositions = new List<int>(sourceText.Length);
+            for (int i = 0; i < sourceText.Length; i++)
+            {
+                if (char.IsWhiteSpace(sourceText[i])) continue;
+                compactSource.Append(sourceText[i]);
+                sourcePositions.Add(i);
+            }
+
+            string source = compactSource.ToString();
+            int searchFrom = 0;
+            var matchedRuns = new List<(int runIndex, int sourceStart, int sourceEnd)>();
+
+            for (int i = 0; i < runs.Count; i++)
+            {
+                var token = new StringBuilder(runs[i].Raw.Length);
+                foreach (char character in runs[i].Raw)
+                {
+                    if (!char.IsWhiteSpace(character)) token.Append(character);
+                }
+
+                if (token.Length == 0 || searchFrom >= source.Length) continue;
+
+                int match = source.IndexOf(token.ToString(), searchFrom, StringComparison.OrdinalIgnoreCase);
+                if (match < 0) continue;
+
+                int end = match + token.Length;
+                matchedRuns.Add((i, sourcePositions[match], sourcePositions[end - 1] + 1));
+                searchFrom = end;
+            }
+
+            for (int i = 1; i < matchedRuns.Count; i++)
+            {
+                var previous = matchedRuns[i - 1];
+                var next = matchedRuns[i];
+                if (next.runIndex != previous.runIndex + 1) continue;
+
+                for (int position = previous.sourceEnd; position < next.sourceStart; position++)
+                {
+                    if (!char.IsWhiteSpace(sourceText[position])) continue;
+                    runs[previous.runIndex].WordBoundaryAfter = true;
+                    break;
+                }
+            }
         }
 
         private static bool IsUnspacedScript(char c)
@@ -180,7 +253,8 @@ namespace LmenV2.Services
             {
                 if (at == offset) return i;
                 if (at > offset) return null;
-                at += words[i].Text.Length + 1; // Joined by single space
+                at += words[i].Text.Length;
+                if (words[i].HasSpaceAfter) at++;
             }
             return null;
         }
@@ -348,6 +422,7 @@ namespace LmenV2.Services
             try
             {
                 var doc = new XmlDocument();
+                doc.PreserveWhitespace = true;
                 doc.XmlResolver = null;
                 doc.LoadXml(ttml);
 
@@ -436,7 +511,7 @@ namespace LmenV2.Services
                     long sStopMs = (long)(sEnd * 1000.0);
                     string text = span.InnerText;
 
-                    var run = new TimedRun(sStartMs, sStopMs, text);
+                    var run = new TimedRun(sStartMs, sStopMs, text, HasWordBoundaryAfter(span));
                     if (isBg) bgRuns.Add(run);
                     else leadRuns.Add(run);
                 }
@@ -446,7 +521,7 @@ namespace LmenV2.Services
             var bgWords = SyllableRuns.WordsFromRuns(bgRuns);
 
             string leadText = leadWords.Count > 0
-                ? string.Join(" ", leadWords.Select(w => w.Text))
+                ? LyricLine.ComposeText(leadWords)
                 : p.InnerText.Trim();
 
             if (string.IsNullOrWhiteSpace(leadText) && bgWords.Count == 0) return null;
@@ -461,7 +536,7 @@ namespace LmenV2.Services
 
             if (bgWords.Count > 0)
             {
-                string bgText = string.Join(" ", bgWords.Select(w => w.Text));
+                string bgText = LyricLine.ComposeText(bgWords);
                 line.BackgroundLine = new LyricLine
                 {
                     StartTime = bgWords[0].StartTime,
@@ -473,6 +548,24 @@ namespace LmenV2.Services
             }
 
             return line;
+        }
+
+        private static bool HasWordBoundaryAfter(XmlElement span)
+        {
+            for (XmlNode? sibling = span.NextSibling; sibling != null; sibling = sibling.NextSibling)
+            {
+                if (sibling.NodeType is XmlNodeType.Text or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)
+                {
+                    if (sibling.Value?.Any(char.IsWhiteSpace) == true) return true;
+                }
+                else if (sibling is XmlElement element)
+                {
+                    if (string.Equals(element.LocalName, "span", StringComparison.OrdinalIgnoreCase)) return false;
+                    if (string.Equals(element.LocalName, "br", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool TryParseSeconds(string s, out double sec)
@@ -513,8 +606,7 @@ namespace LmenV2.Services
     public static class KaraokeLrc
     {
         private static readonly Regex LineRegex = new Regex(@"^\[(\d{1,8}),(\d{1,8})\](.*)$", RegexOptions.Compiled);
-        private static readonly Regex PrefixWordRegex = new Regex(@"\((\d{1,8}),(\d{1,8})(?:,\d{1,8})?\)([^()]*)", RegexOptions.Compiled);
-        private static readonly Regex SuffixWordRegex = new Regex(@"([^()]*)\((\d{1,8}),(\d{1,8})(?:,\d{1,8})?\)", RegexOptions.Compiled);
+        private static readonly Regex TimedTagRegex = new Regex(@"\((\d{1,8}),(\d{1,8})(?:,\d{1,8})?\)", RegexOptions.Compiled);
         private static readonly Regex ContentRegex = new Regex(@"LyricContent\s*=\s*\""([^\""]*)\""", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public static bool LooksLike(string raw)
@@ -526,11 +618,7 @@ namespace LmenV2.Services
             while ((line = reader.ReadLine()) != null)
             {
                 var match = LineRegex.Match(line.Trim());
-                if (match.Success)
-                {
-                    string body = match.Groups[3].Value;
-                    if (PrefixWordRegex.IsMatch(body) || SuffixWordRegex.IsMatch(body)) return true;
-                }
+                if (match.Success && TimedTagRegex.IsMatch(match.Groups[3].Value)) return true;
             }
             return false;
         }
@@ -553,32 +641,11 @@ namespace LmenV2.Services
                     !long.TryParse(match.Groups[2].Value, out long lineDur)) continue;
 
                 string body = match.Groups[3].Value;
-                var prefixMatches = PrefixWordRegex.Matches(body);
-                List<LyricWord> words;
+                var words = SyllableRuns.WordsFromRuns(ParseTimedRuns(body));
 
-                if (prefixMatches.Count > 0)
-                {
-                    var runs = prefixMatches.Select(m =>
-                    {
-                        long s = long.Parse(m.Groups[1].Value);
-                        long d = long.Parse(m.Groups[2].Value);
-                        return new TimedRun(s, s + d, m.Groups[3].Value);
-                    }).ToList();
-                    words = SyllableRuns.WordsFromRuns(runs);
-                }
-                else
-                {
-                    var suffixMatches = SuffixWordRegex.Matches(body);
-                    var runs = suffixMatches.Select(m =>
-                    {
-                        long s = long.Parse(m.Groups[2].Value);
-                        long d = long.Parse(m.Groups[3].Value);
-                        return new TimedRun(s, s + d, m.Groups[1].Value);
-                    }).ToList();
-                    words = SyllableRuns.WordsFromRuns(runs);
-                }
-
-                string lineText = words.Count > 0 ? string.Join(" ", words.Select(w => w.Text)) : body.Trim();
+                string lineText = words.Count > 0
+                    ? LyricLine.ComposeText(words)
+                    : TimedTagRegex.Replace(body, string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(lineText)) continue;
 
                 lines.Add(new LyricLine
@@ -591,6 +658,40 @@ namespace LmenV2.Services
             }
 
             return LyricGaps.WithInstrumentalGaps(lines);
+        }
+
+        private static List<TimedRun> ParseTimedRuns(string body)
+        {
+            var tags = TimedTagRegex.Matches(body).Cast<Match>().ToList();
+            if (tags.Count == 0) return new List<TimedRun>();
+
+            var runs = new List<TimedRun>(tags.Count);
+            bool prefixTimed = string.IsNullOrWhiteSpace(body.Substring(0, tags[0].Index));
+            int textStart = 0;
+
+            for (int i = 0; i < tags.Count; i++)
+            {
+                var tag = tags[i];
+                long start = long.Parse(tag.Groups[1].Value, CultureInfo.InvariantCulture);
+                long duration = long.Parse(tag.Groups[2].Value, CultureInfo.InvariantCulture);
+                string text;
+
+                if (prefixTimed)
+                {
+                    int from = tag.Index + tag.Length;
+                    int to = i + 1 < tags.Count ? tags[i + 1].Index : body.Length;
+                    text = body.Substring(from, Math.Max(0, to - from));
+                }
+                else
+                {
+                    text = body.Substring(textStart, tag.Index - textStart);
+                    textStart = tag.Index + tag.Length;
+                }
+
+                runs.Add(new TimedRun(start, start + duration, text, wordBoundaryAfter: !prefixTimed));
+            }
+
+            return runs;
         }
 
         private static string ExtractLyricContent(string raw)
@@ -665,7 +766,7 @@ namespace LmenV2.Services
                     long wStart = Stamp(wm);
                     long wEnd = (w + 1 < row.words.Count) ? Stamp(row.words[w + 1]) : lineEnd;
                     string wordText = WebUtility.HtmlDecode(wm.Groups[4].Value);
-                    runs.Add(new TimedRun(wStart, wEnd, wordText));
+                    runs.Add(new TimedRun(wStart, wEnd, wordText, wordBoundaryAfter: true));
                 }
 
                 var words = SyllableRuns.WordsFromRuns(runs);
@@ -676,7 +777,7 @@ namespace LmenV2.Services
                 {
                     StartTime = TimeSpan.FromMilliseconds(finalStart),
                     EndTime = TimeSpan.FromMilliseconds(lineEnd),
-                    Text = string.Join(" ", words.Select(w => w.Text)),
+                    Text = LyricLine.ComposeText(words),
                     Words = words
                 });
             }

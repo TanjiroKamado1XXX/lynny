@@ -14,11 +14,11 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <Platforms>AnyCPU;x64</Platforms>
     <Version>2.0.0</Version>
-    <Product>Lmen v2 - Ambient Music Visualizer</Product>
-    <Company>Lmen Project</Company>
-    <Authors>Lmen Project</Authors>
+    <Product>Nyx - Ambient Music Visualizer</Product>
+    <Company>Nyx</Company>
+    <Authors>Nyx</Authors>
     <Description>Atmospheric, dynamic edge-lighting visualizer and timed synced lyrics companion for Windows.</Description>
-    <Copyright>Copyright © 2026</Copyright>
+    <Copyright>Copyright © 2026 Nyx</Copyright>
     <AssemblyVersion>2.0.0.0</AssemblyVersion>
     <FileVersion>2.0.0.0</FileVersion>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -33,6 +33,13 @@
     <None Remove="Rendering\Kinetic\Shaders\Fisheye.ps" />
     <Resource Include="Rendering\Kinetic\Shaders\Fisheye.ps" />
     <None Remove="Rendering\Kinetic\Shaders\Fisheye.fx" />
+    <None Remove="Rendering\Kinetic\Shaders\ChromaticSplit.ps" />
+    <Resource Include="Rendering\Kinetic\Shaders\ChromaticSplit.ps" />
+    <None Remove="Rendering\Kinetic\Shaders\ChromaticSplit.fx" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
   </ItemGroup>
 
 </Project>

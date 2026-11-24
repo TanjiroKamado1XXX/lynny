@@ -36,7 +36,16 @@ namespace LmenV2.Services
         private readonly ConcurrentDictionary<string, string> _isrcCache =
             new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        private const int DiskCacheSchemaVersion = 2;
         private readonly string _cacheDirectory;
+
+        private sealed class DiskCacheEntry
+        {
+            public DiskCacheEntry() { }
+
+            public int SchemaVersion { get; set; }
+            public TrackLyrics? Lyrics { get; set; }
+        }
 
         public LyricsService()
         {
@@ -575,7 +584,8 @@ namespace LmenV2.Services
                 if (File.Exists(path))
                 {
                     string json = File.ReadAllText(path);
-                    return JsonSerializer.Deserialize<TrackLyrics>(json);
+                    var entry = JsonSerializer.Deserialize<DiskCacheEntry>(json);
+                    return entry?.SchemaVersion == DiskCacheSchemaVersion ? entry.Lyrics : null;
                 }
             }
             catch { }
@@ -587,7 +597,9 @@ namespace LmenV2.Services
             try
             {
                 string path = GetCacheFilePath(songKey);
-                string json = JsonSerializer.Serialize(lyrics, new JsonSerializerOptions { WriteIndented = false });
+                string json = JsonSerializer.Serialize(
+                    new DiskCacheEntry { SchemaVersion = DiskCacheSchemaVersion, Lyrics = lyrics },
+                    new JsonSerializerOptions { WriteIndented = false });
                 File.WriteAllText(path, json);
             }
             catch { }

@@ -26,21 +26,22 @@ namespace LmenV2.Services
 
         // Energy envelope & dynamic AGC
         private float _smoothedEnergy = 0f;
+        private float _smoothedBassEnergy;
         private float _peakEnergy = 0.05f; // Dynamic AGC ceiling
+        private float _latestBeatPulse;
+        private float _latestBassEnergy;
+        private float _latestEnergy;
 
         public bool IsRunning { get; private set; } = false;
         public event Action<float>? BeatPulse;
+        public float BeatPulseSnapshot => Volatile.Read(ref _latestBeatPulse);
+        public float BassEnergy => Volatile.Read(ref _latestBassEnergy);
+        public float SmoothedEnergy => Volatile.Read(ref _latestEnergy);
+        public float CurrentBeatPulse => BeatPulseSnapshot;
+        public float CurrentBassEnergy => BassEnergy;
+        public float CurrentEnergySnapshot => SmoothedEnergy;
 
-        public float CurrentEnergy
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    return _smoothedEnergy;
-                }
-            }
-        }
+        public float CurrentEnergy => SmoothedEnergy;
 
         public void Start()
         {
@@ -183,8 +184,13 @@ namespace LmenV2.Services
             lock (_lock)
             {
                 _smoothedEnergy *= 0.72f;
+                _smoothedBassEnergy *= 0.72f;
                 if (_smoothedEnergy < 0.0005f) _smoothedEnergy = 0f;
+                if (_smoothedBassEnergy < 0.0005f) _smoothedBassEnergy = 0f;
                 _peakEnergy = Math.Max(_peakEnergy * 0.98f, 0.015f);
+                Volatile.Write(ref _latestBeatPulse, _smoothedEnergy);
+                Volatile.Write(ref _latestBassEnergy, _smoothedBassEnergy);
+                Volatile.Write(ref _latestEnergy, _smoothedEnergy);
             }
         }
 
@@ -244,6 +250,7 @@ namespace LmenV2.Services
                 float instantEnergy = (bassRms * 0.8f) + (totalRms * 0.2f);
 
                 float energy;
+                float bassEnergy;
                 lock (_lock)
                 {
                     // Automatic Gain Control (AGC) - adapts to quiet music and loud music
@@ -260,10 +267,12 @@ namespace LmenV2.Services
                     // Normalized energy factor: 0.0 to 1.0
                     float range = Math.Max(0.005f, _peakEnergy);
                     float normalized = Math.Clamp(instantEnergy / range, 0f, 1f);
+                    float normalizedBass = Math.Clamp(bassRms / range, 0f, 1f);
 
                     // Nonlinear expansion: square the value so quiet background sounds stay quiet,
                     // and bass kicks produce a sharp, satisfying surge!
                     float punchEnergy = normalized * normalized;
+                    float punchBass = normalizedBass * normalizedBass;
 
                     // Fast attack (instant jump on beat), smooth exponential decay
                     if (punchEnergy > _smoothedEnergy)
@@ -275,10 +284,23 @@ namespace LmenV2.Services
                         _smoothedEnergy = (_smoothedEnergy * 0.84f) + (punchEnergy * 0.16f);
                     }
 
+                    if (punchBass > _smoothedBassEnergy)
+                    {
+                        _smoothedBassEnergy = (_smoothedBassEnergy * 0.2f) + (punchBass * 0.8f);
+                    }
+                    else
+                    {
+                        _smoothedBassEnergy = (_smoothedBassEnergy * 0.84f) + (punchBass * 0.16f);
+                    }
+
                     energy = _smoothedEnergy;
+                    bassEnergy = _smoothedBassEnergy;
                 }
 
                 Interlocked.Exchange(ref _lastDataTicks, Environment.TickCount64);
+                Volatile.Write(ref _latestBeatPulse, energy);
+                Volatile.Write(ref _latestBassEnergy, bassEnergy);
+                Volatile.Write(ref _latestEnergy, energy);
 
                 // Publish the value captured under the lock instead of re-reading the
                 // shared field from the audio callback thread.

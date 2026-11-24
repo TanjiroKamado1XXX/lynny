@@ -1,5 +1,4 @@
-﻿using System;
-using System.Diagnostics;
+using System;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -8,10 +7,12 @@ using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Threading.Tasks;
 using LmenV2.Models;
 using LmenV2.Rendering;
 using LmenV2.Rendering.Kinetic;
 using LmenV2.Services;
+using LmenV2.Helpers;
 
 namespace LmenV2.Views
 {
@@ -53,9 +54,11 @@ namespace LmenV2.Views
         private bool _activeBackdropIsA = true;
         private ImageSource? _lastBackdropSource;
         private BitmapSource? _currentBlurredBackdrop;
+        private AudioReactiveMeshBackdrop? _backdropMeshRenderer;
+        private AudioReactiveMeshBackdrop? _motionMeshRenderer;
 
-        private Stopwatch _renderTimer = new Stopwatch();
-        private TimeSpan _lastFrameTime = TimeSpan.Zero;
+        private TimeSpan _lastRenderingTime = TimeSpan.MinValue;
+        private TimeSpan _lastTaskbarHoverCheckTime = TimeSpan.MinValue;
         private int _lastDisplayedPosSec = -1;
         private int _lastDisplayedDurSec = -1;
 
@@ -86,6 +89,9 @@ namespace LmenV2.Views
         // Window Mode: Fullscreen vs Restored (Windowed)
         private bool _isRestoredMode = false;
         private Rect _savedRestoredBounds = new Rect(0, 0, 980, 680);
+        private bool _dualDisplayCoverOnly;
+        private bool _lyricsModeBeforeDualDisplay;
+        private bool _wasRestoredBeforeDualDisplay;
 
         // System Audio Volume Control
         private readonly SystemVolumeService _volumeService = SystemVolumeService.Instance;
@@ -133,9 +139,28 @@ namespace LmenV2.Views
 
         // Cotodama / LyricalStudio Kinetic Typography Stage Renderer
         private KineticStageRenderer? _kineticRenderer;
+        private ChromaticSplitEffect? _fullscreenChromaticSplitEffect;
+        private ChromaticSplitEffect? _backdropChromaticSplitEffect;
+        private ChromaticSplitEffect? _artworkChromaticSplitEffect;
+        private ChromaticSplitEffect? _scrollLyricsChromaticSplitEffect;
+        private double _chromaticSplitAmount;
+        private double _chromaticPulseStrength;
+        private bool _appliedLowLatencyMode;
 
         // High-precision Monotonic Clock Reconciler (BitChord protection against GSMTC transport lag)
         private readonly LyricClockReconciler _lyricClock = new LyricClockReconciler();
+
+        public event Action? SecondaryLyricsToggleRequested;
+        public event Action? SecondaryFullscreenToggleRequested;
+        public TrackLyrics? CurrentLyrics => _currentLyrics;
+        public MediaTrackInfo? CurrentTrack => _mediaService.CurrentTrack;
+        public TimeSpan CurrentLyricPosition => LyricClockPosition;
+        public bool IsPlaybackPlaying => _isPlaying;
+        public bool IsAudioReactivityEnabled => _audioReactivityEnabled;
+        public bool IsRestoredMode => _isRestoredMode;
+        public bool IsTranslationActive => _translationActive;
+        public bool IsRomanizationActive => _romanizationActive;
+        public KineticTemplate CurrentLyricsTemplate => _kineticRenderer?.CurrentTemplateChoice ?? KineticTemplate.Auto;
 
         // Cinematic Depth-of-Field Blur Effects (Pre-frozen immutable DirectX shader resources)
         private readonly System.Windows.Media.Effects.BlurEffect _blurDist1 = new System.Windows.Media.Effects.BlurEffect { Radius = 0.8, RenderingBias = System.Windows.Media.Effects.RenderingBias.Performance };
@@ -327,18 +352,26 @@ namespace LmenV2.Views
             _savedRestoredBounds = new Rect(rx, ry, rw, rh);
 
             InitSliderValues();
+            _backdropMeshRenderer = new AudioReactiveMeshBackdrop(AudioReactiveMeshCanvas);
+            _motionMeshRenderer = new AudioReactiveMeshBackdrop(MotionMeshCanvas);
             _kineticRenderer = new KineticStageRenderer(KineticLyricsCanvas);
+            _appliedLowLatencyMode = _settings.LowLatencyMode;
+            _kineticRenderer.SetLowLatencyMode(_appliedLowLatencyMode);
+            _fullscreenChromaticSplitEffect = new ChromaticSplitEffect();
+            _backdropChromaticSplitEffect = new ChromaticSplitEffect();
+            _artworkChromaticSplitEffect = new ChromaticSplitEffect();
+            _scrollLyricsChromaticSplitEffect = new ChromaticSplitEffect();
+            ApplyChromaticSplitScope();
             ApplyGeometry();
             UpdateWindowClip();
+            ApplyBackdropMode();
             UpdateColors(_mediaService.CurrentTrack);
             UpdateVolumeUI(_volumeService.MasterVolume, _volumeService.IsMuted);
-
             // Adopt the current palette without easing so the visualizer does not fade in
             // from the default crimson on every launch.
             _beam.EaseColor(1.0);
 
-            _renderTimer.Start();
-            _lastFrameTime = _renderTimer.Elapsed;
+            _lastRenderingTime = TimeSpan.MinValue;
             CompositionTarget.Rendering += OnRenderFrame;
             MotionArtworkService.Instance.VideoCached += OnMotionVideoCached;
             IsVisibleChanged += FullscreenVisualizerWindow_IsVisibleChanged;
@@ -407,6 +440,12 @@ namespace LmenV2.Views
                     if (BackdropSlider != null) BackdropSlider.Value = _settings.BackdropBrightness * 100.0;
                     if (SpeedSlider != null) SpeedSlider.Value = _settings.RotationSpeed * 100.0;
                     if (ReactivitySlider != null) ReactivitySlider.Value = _settings.AudioReactivity * 100.0;
+                    if (PrimaryBrightnessSlider != null) PrimaryBrightnessSlider.Value = _settings.PrimaryBrightness * 100.0;
+                    if (PrimaryContrastSlider != null) PrimaryContrastSlider.Value = _settings.PrimaryContrast * 100.0;
+                    if (PrimaryDimmingSlider != null) PrimaryDimmingSlider.Value = _settings.PrimaryBackdropDimming * 100.0;
+                    if (PrimaryGlowBrightnessSlider != null) PrimaryGlowBrightnessSlider.Value = _settings.PrimaryGlowBrightness * 100.0;
+                    if (PrimaryGlowSpreadSlider != null) PrimaryGlowSpreadSlider.Value = _settings.PrimaryGlowSpread;
+                    if (PrimaryAudioReactivitySlider != null) PrimaryAudioReactivitySlider.Value = _settings.PrimaryAudioReactivity * 100.0;
 
                     if (BrightnessValText != null) BrightnessValText.Text = $"{(int)(_settings.GlowBrightness * 100)}%";
                     if (SpreadValText != null) SpreadValText.Text = $"{(int)_settings.GlowSpread} px";
@@ -414,7 +453,11 @@ namespace LmenV2.Views
                     if (SpeedValText != null) SpeedValText.Text = $"{_settings.RotationSpeed:0.0}x";
                     if (ReactivityValText != null) ReactivityValText.Text = $"{_settings.AudioReactivity:0.0}x";
 
-                    if (TvBackdropHost != null) TvBackdropHost.Opacity = _settings.BackdropBrightness;
+                    ApplyBackdropMode();
+                    ApplyLowLatencyMode();
+                    ApplyBackdropVignette(_mediaService.CurrentTrack?.DarkVignetteColor ?? Color.FromRgb(9, 11, 16));
+                    ApplyChromaticSplitScope();
+                    UpdatePrimaryScreenSettingLabels();
                     ApplyGeometry();
                 }
                 finally
@@ -440,8 +483,16 @@ namespace LmenV2.Views
                 BackdropValText.Text = $"{(int)BackdropSlider.Value}%";
                 SpeedValText.Text = $"{_settings.RotationSpeed:0.0}x";
                 ReactivityValText.Text = $"{_settings.AudioReactivity:0.0}x";
+                PrimaryBrightnessSlider.Value = _settings.PrimaryBrightness * 100.0;
+                PrimaryContrastSlider.Value = _settings.PrimaryContrast * 100.0;
+                PrimaryDimmingSlider.Value = _settings.PrimaryBackdropDimming * 100.0;
+                PrimaryGlowBrightnessSlider.Value = _settings.PrimaryGlowBrightness * 100.0;
+                PrimaryGlowSpreadSlider.Value = _settings.PrimaryGlowSpread;
+                PrimaryAudioReactivitySlider.Value = _settings.PrimaryAudioReactivity * 100.0;
+                UpdatePrimaryScreenSettingLabels();
 
                 TvBackdropHost.Opacity = _settings.BackdropBrightness;
+                ApplyBackdropMode();
             }
             finally
             {
@@ -449,18 +500,185 @@ namespace LmenV2.Views
             }
         }
 
+        private void ApplyBackdropMode()
+        {
+            double artworkOpacity;
+            double meshOpacity;
+            switch (_settings.BackdropMode)
+            {
+                case AmbientBackdropMode.AudioReactiveMesh:
+                    artworkOpacity = 0.0;
+                    meshOpacity = 1.0;
+                    break;
+                case AmbientBackdropMode.Blended:
+                    artworkOpacity = 0.55;
+                    meshOpacity = 1.0;
+                    break;
+                default:
+                    artworkOpacity = 1.0;
+                    meshOpacity = 0.0;
+                    break;
+            }
+
+            double backdropOpacity = _settings.BackdropBrightness;
+            if (TvBackdropHost != null) TvBackdropHost.Opacity = backdropOpacity;
+            if (BackdropArtworkLayer != null) BackdropArtworkLayer.Opacity = artworkOpacity;
+            if (AudioReactiveMeshCanvas != null) AudioReactiveMeshCanvas.Opacity = meshOpacity;
+            if (MotionBackdropArtworkLayer != null)
+                MotionBackdropArtworkLayer.Opacity = artworkOpacity;
+            if (MotionMeshCanvas != null)
+                MotionMeshCanvas.Opacity = meshOpacity;
+            if (MotionBlurredBackdrop != null) MotionBlurredBackdrop.Opacity = backdropOpacity;
+            if (MotionVideoBackdrop?.Source != null && MotionVideoBackdrop.Opacity > 0.01)
+                MotionVideoBackdrop.Opacity = backdropOpacity;
+            if (TvMotionVideoBackdrop?.Source != null && TvMotionVideoBackdrop.Opacity > 0.01)
+                TvMotionVideoBackdrop.Opacity = backdropOpacity;
+            double videoBlurRadius = _settings.LowLatencyMode ? 8.0 : 24.0;
+            if (TvMotionVideoBackdrop?.Effect is BlurEffect tvBlur)
+                tvBlur.Radius = videoBlurRadius;
+            if (MotionVideoBackdrop?.Effect is BlurEffect motionBlur)
+                motionBlur.Radius = videoBlurRadius;
+        }
+
+        private void ApplyLowLatencyMode()
+        {
+            bool enabled = _settings.LowLatencyMode;
+            if (_appliedLowLatencyMode == enabled) return;
+
+            _appliedLowLatencyMode = enabled;
+            _kineticRenderer?.SetLowLatencyMode(enabled);
+            _lastBackdropSource = null;
+            UpdateBackdropImage(_mediaService.CurrentTrack);
+            ApplyBackdropMode();
+            ApplyChromaticSplitScope();
+        }
+
+        private void ApplyChromaticSplitScope()
+        {
+            if (_fullscreenChromaticSplitEffect == null ||
+                _backdropChromaticSplitEffect == null ||
+                _artworkChromaticSplitEffect == null ||
+                _scrollLyricsChromaticSplitEffect == null)
+            {
+                return;
+            }
+
+            bool enabled = _settings.EnableChromaticSplit && !_settings.LowLatencyMode;
+            if (!enabled)
+            {
+                _chromaticSplitAmount = 0.0;
+                _chromaticPulseStrength = 0.0;
+            }
+
+            _fullscreenChromaticSplitEffect.DisplayBrightness = _settings.PrimaryBrightness;
+            _fullscreenChromaticSplitEffect.DisplayContrast = _settings.PrimaryContrast;
+            _fullscreenChromaticSplitEffect.SplitAmount =
+                enabled && _settings.ChromaticSplitTarget == ChromaticSplitScope.FullVisualizerStage
+                    ? _chromaticSplitAmount
+                    : 0.0;
+            _fullscreenChromaticSplitEffect.PulseStrength = _chromaticPulseStrength;
+            switch (_settings.ChromaticSplitTarget)
+            {
+                case ChromaticSplitScope.BackdropArtwork:
+                    MainRootGrid.Effect = _fullscreenChromaticSplitEffect;
+                    TvBackdropHost.Effect = enabled ? _backdropChromaticSplitEffect : null;
+                    AlbumArtVisualGrid.Effect = enabled ? _artworkChromaticSplitEffect : null;
+                    LyricsScrollViewer.Effect = null;
+                    _kineticRenderer?.SetChromaticSplitEnabled(false);
+                    break;
+
+                case ChromaticSplitScope.FullVisualizerStage:
+                    MainRootGrid.Effect = _fullscreenChromaticSplitEffect;
+                    TvBackdropHost.Effect = null;
+                    AlbumArtVisualGrid.Effect = null;
+                    LyricsScrollViewer.Effect = null;
+                    _kineticRenderer?.SetChromaticSplitEnabled(false);
+                    break;
+
+                default:
+                    MainRootGrid.Effect = _fullscreenChromaticSplitEffect;
+                    TvBackdropHost.Effect = null;
+                    AlbumArtVisualGrid.Effect = null;
+                    LyricsScrollViewer.Effect = enabled ? _scrollLyricsChromaticSplitEffect : null;
+                    _kineticRenderer?.SetChromaticSplitEnabled(enabled);
+                    break;
+            }
+
+        }
+
+        private void UpdateChromaticSplit(double dt, float bassEnergy, float beatPulse)
+        {
+            if (!_settings.EnableChromaticSplit || _settings.LowLatencyMode)
+            {
+                return;
+            }
+
+            double reactivity = _audioReactivityEnabled
+                ? Math.Clamp(_settings.AudioReactivity, 0.0, 2.0)
+                : 0.0;
+            double pulse = Math.Clamp(Math.Max(bassEnergy, beatPulse * 0.85f) * reactivity, 0.0, 1.0);
+            double response = Math.Clamp((pulse - 0.08) / 0.92, 0.0, 1.0);
+            double targetAmount = _settings.MaxChromaticSplit * response;
+            double timeConstant = targetAmount > _chromaticSplitAmount ? 0.045 : 0.22;
+            double blend = 1.0 - Math.Exp(-dt / timeConstant);
+            _chromaticSplitAmount += (targetAmount - _chromaticSplitAmount) * blend;
+            _chromaticPulseStrength += (pulse - _chromaticPulseStrength) * blend;
+
+            switch (_settings.ChromaticSplitTarget)
+            {
+                case ChromaticSplitScope.BackdropArtwork:
+                    UpdateChromaticSplitEffect(_backdropChromaticSplitEffect);
+                    UpdateChromaticSplitEffect(_artworkChromaticSplitEffect);
+                    break;
+
+                case ChromaticSplitScope.FullVisualizerStage:
+                    UpdateChromaticSplitEffect(_fullscreenChromaticSplitEffect);
+                    break;
+
+                default:
+                    UpdateChromaticSplitEffect(_scrollLyricsChromaticSplitEffect);
+                    _kineticRenderer?.UpdateChromaticSplit(_chromaticSplitAmount, _chromaticPulseStrength);
+                    break;
+            }
+        }
+
+        private void UpdateChromaticSplitEffect(ChromaticSplitEffect? effect)
+        {
+            if (effect == null) return;
+
+            if (Math.Abs(effect.SplitAmount - _chromaticSplitAmount) >= 0.00001)
+            {
+                effect.SplitAmount = _chromaticSplitAmount;
+            }
+
+            if (Math.Abs(effect.PulseStrength - _chromaticPulseStrength) >= 0.01)
+            {
+                effect.PulseStrength = _chromaticPulseStrength;
+            }
+        }
+
         private void OnRenderFrame(object? sender, EventArgs e)
         {
             if (!IsVisible || WindowState == WindowState.Minimized) return;
-
-            var now = _renderTimer.Elapsed;
-            double dt = (now - _lastFrameTime).TotalSeconds;
-            _lastFrameTime = now;
-
-            if (dt <= 0.0 || dt > 0.1) dt = 0.016;
+            if (!RenderFrameClock.TryGetDeltaTime(e, ref _lastRenderingTime, out double dt)) return;
 
             // 1. ROTATION SPEED DIRECTLY DRIVEN BY MUSIC
-            float rawEnergy = _audioReactivityEnabled ? _audioService.CurrentEnergy : 0f;
+            float rawEnergy = _audioReactivityEnabled ? _audioService.CurrentEnergySnapshot : 0f;
+            float bassEnergy = _audioReactivityEnabled ? _audioService.CurrentBassEnergy : 0f;
+            float beatPulse = _audioReactivityEnabled ? _audioService.CurrentBeatPulse : 0f;
+            _backdropMeshRenderer?.SetSize(AudioReactiveMeshCanvas.ActualWidth, AudioReactiveMeshCanvas.ActualHeight);
+            _motionMeshRenderer?.SetSize(MotionMeshCanvas.ActualWidth, MotionMeshCanvas.ActualHeight);
+            _backdropMeshRenderer?.Update(
+                dt, rawEnergy, bassEnergy,
+                !_isFullscreenMotionActive && _isPlaying && _audioReactivityEnabled,
+                _settings.MeshMotionSpeed,
+                _audioReactivityEnabled ? _settings.MeshAudioReactivity : 0.0);
+            _motionMeshRenderer?.Update(
+                dt, rawEnergy, bassEnergy,
+                _isFullscreenMotionActive && _isPlaying && _audioReactivityEnabled,
+                _settings.MeshMotionSpeed,
+                _audioReactivityEnabled ? _settings.MeshAudioReactivity : 0.0);
+            UpdateChromaticSplit(dt, bassEnergy, beatPulse);
             double speedMultiplier = _settings.RotationSpeed;
 
             // Track dynamic kick & bass excitement for the "excited jump" effect
@@ -687,7 +905,12 @@ namespace LmenV2.Views
             }
 
             // 6. ACCESSIBLE TASKBAR ON HOVER (WHEN IN FULLSCREEN MODE)
-            UpdateTaskbarVisibilityOnHover();
+            if (_lastTaskbarHoverCheckTime == TimeSpan.MinValue ||
+                (_lastRenderingTime - _lastTaskbarHoverCheckTime).TotalMilliseconds >= 50.0)
+            {
+                _lastTaskbarHoverCheckTime = _lastRenderingTime;
+                UpdateTaskbarVisibilityOnHover();
+            }
         }
 
         private void OnTrackUpdated(MediaTrackInfo track)
@@ -764,8 +987,14 @@ namespace LmenV2.Views
 
         private void UpdateColors(MediaTrackInfo? track)
         {
+            _backdropMeshRenderer?.SetPalette(track);
+            _motionMeshRenderer?.SetPalette(track);
+            UpdateBackdropImage(track);
+
             if (track == null)
             {
+                _isPlaying = false;
+                ApplyBackdropVignette(Color.FromRgb(9, 11, 16));
                 TrackTitleText.Text = "Ready to Play";
                 ArtistNameText.Text = "Play music to begin";
                 if (LyricsSongTitleText != null) LyricsSongTitleText.Text = "Ready to Play";
@@ -834,19 +1063,6 @@ namespace LmenV2.Views
             }
 
             _currentSongKey = newSongKey;
-
-            // TV Ambient Blurred Background Cross-Fade
-            if (track.Thumbnail != null && !ReferenceEquals(track.Thumbnail, _lastBackdropSource))
-            {
-                _lastBackdropSource = track.Thumbnail;
-                var blurred = BackdropBlur.CreateBlurredBackdrop(track.Thumbnail);
-                CrossFadeBackdrop(blurred);
-            }
-            else if (track.Thumbnail == null && _lastBackdropSource != null)
-            {
-                _lastBackdropSource = null;
-                CrossFadeBackdrop(null);
-            }
 
             SetPlayPauseIconState(track.IsPlaying);
 
@@ -918,9 +1134,35 @@ namespace LmenV2.Views
             }
         }
 
+        private void UpdateBackdropImage(MediaTrackInfo? track)
+        {
+            ImageSource? source = track?.Thumbnail;
+            if (ReferenceEquals(source, _lastBackdropSource) && _currentBlurredBackdrop != null) return;
+
+            _lastBackdropSource = source;
+            BitmapSource? blurred = source is BitmapSource bitmap
+                ? CreateBlurredBackdrop(bitmap)
+                : BackdropBlur.GetFallbackBackdrop();
+            CrossFadeBackdrop(blurred ?? BackdropBlur.GetFallbackBackdrop());
+        }
+
+        private BitmapSource? CreateBlurredBackdrop(BitmapSource? source)
+        {
+            return _settings.LowLatencyMode
+                ? BackdropBlur.CreateBlurredBackdrop(source, targetSize: 144, blurRadius: 4, passes: 1)
+                : BackdropBlur.CreateBlurredBackdrop(source);
+        }
+
         private void ApplyGlowColor(Color dom)
         {
             _beam.SetTargetColor(dom);
+            Color accent = _mediaService.CurrentTrack?.AccentColor ?? dom;
+            Resources["NyxAccentColor"] = accent;
+            Resources["NyxAccentDarkColor"] = Color.FromRgb(
+                (byte)(accent.R * 0.48),
+                (byte)(accent.G * 0.48),
+                (byte)(accent.B * 0.48));
+            Resources["NyxAccentSoftColor"] = Color.FromArgb(0x48, accent.R, accent.G, accent.B);
 
             var duration = TimeSpan.FromMilliseconds(500);
 
@@ -929,12 +1171,7 @@ namespace LmenV2.Views
                 ? Color.FromArgb(255, (byte)(dom.R * 0.08), (byte)(dom.G * 0.08), (byte)(dom.B * 0.08))
                 : (_mediaService.CurrentTrack?.DarkVignetteColor ?? Color.FromArgb(255, 15, 5, 8));
 
-            Color vigCenter = Color.FromArgb(60, 0, 0, 0);
-            Color vigMid = Color.FromArgb(130, (byte)(darkVig.R * 0.3), (byte)(darkVig.G * 0.3), (byte)(darkVig.B * 0.3));
-            Color vigOuter = Color.FromArgb(220, darkVig.R, darkVig.G, darkVig.B);
-            AnimateGradientStopColor(BackdropVignetteCenterStop, vigCenter, duration);
-            AnimateGradientStopColor(BackdropVignetteMidStop, vigMid, duration);
-            AnimateGradientStopColor(BackdropVignetteOuterStop, vigOuter, duration);
+            ApplyBackdropVignette(darkVig);
 
             // Background Tint
             var bgBrush = MainRootBorder.Background as SolidColorBrush;
@@ -949,6 +1186,29 @@ namespace LmenV2.Views
             }
 
             UpdateLyricBrushes(dom);
+        }
+
+        private void ApplyBackdropVignette(Color darkVig)
+        {
+            double darkness = _settings.BackdropVignetteDarkness;
+            Color vigCenter = Color.FromArgb((byte)(60 * darkness), 0, 0, 0);
+            Color vigMid = Color.FromArgb(
+                (byte)(130 * darkness),
+                (byte)(darkVig.R * 0.3),
+                (byte)(darkVig.G * 0.3),
+                (byte)(darkVig.B * 0.3));
+            Color vigOuter = Color.FromArgb(
+                (byte)(220 * darkness),
+                darkVig.R,
+                darkVig.G,
+                darkVig.B);
+            var duration = TimeSpan.FromMilliseconds(500);
+            AnimateGradientStopColor(BackdropVignetteCenterStop, vigCenter, duration);
+            AnimateGradientStopColor(BackdropVignetteMidStop, vigMid, duration);
+            AnimateGradientStopColor(BackdropVignetteOuterStop, vigOuter, duration);
+            AnimateGradientStopColor(MotionVignetteCenterStop, vigCenter, duration);
+            AnimateGradientStopColor(MotionVignetteMidStop, vigMid, duration);
+            AnimateGradientStopColor(MotionVignetteOuterStop, vigOuter, duration);
         }
 
         private void UpdatePlaybackTimeUI(TimeSpan pos, TimeSpan dur)
@@ -1287,6 +1547,58 @@ namespace LmenV2.Views
         private void CloseQuickControls_Click(object sender, RoutedEventArgs e)
         {
             QuickGlowControlsCard.Visibility = Visibility.Collapsed;
+        }
+
+        private void PrimaryDisplaySettingsButton_Click(object sender, RoutedEventArgs e)
+        {
+            InitSliderValues();
+            PrimaryDisplaySettingsPopup.IsOpen = !PrimaryDisplaySettingsPopup.IsOpen;
+        }
+
+        private void DisplaySettingsPopup_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Escape)
+            {
+                PrimaryDisplaySettingsPopup.IsOpen = false;
+                e.Handled = true;
+            }
+        }
+
+        private void PrimaryScreenSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_suppressSettingsUpdate || !IsLoaded) return;
+
+            if (ReferenceEquals(sender, PrimaryBrightnessSlider))
+                _settings.PrimaryBrightness = e.NewValue / 100.0;
+            else if (ReferenceEquals(sender, PrimaryContrastSlider))
+                _settings.PrimaryContrast = e.NewValue / 100.0;
+            else if (ReferenceEquals(sender, PrimaryDimmingSlider))
+                _settings.PrimaryBackdropDimming = e.NewValue / 100.0;
+            else if (ReferenceEquals(sender, PrimaryGlowBrightnessSlider))
+                _settings.PrimaryGlowBrightness = e.NewValue / 100.0;
+            else if (ReferenceEquals(sender, PrimaryGlowSpreadSlider))
+                _settings.PrimaryGlowSpread = e.NewValue;
+            else if (ReferenceEquals(sender, PrimaryAudioReactivitySlider))
+                _settings.PrimaryAudioReactivity = e.NewValue / 100.0;
+
+            UpdatePrimaryScreenSettingLabels();
+        }
+
+        private void UpdatePrimaryScreenSettingLabels()
+        {
+            if (PrimaryBrightnessValue == null) return;
+            PrimaryBrightnessValue.Text = $"Brightness  {PrimaryBrightnessSlider.Value:0}%";
+            PrimaryContrastValue.Text = $"Contrast  {PrimaryContrastSlider.Value:0}%";
+            PrimaryDimmingValue.Text = $"Backdrop dimming  {PrimaryDimmingSlider.Value:0}%";
+            PrimaryGlowBrightnessValue.Text = $"Glow brightness  {PrimaryGlowBrightnessSlider.Value:0}%";
+            PrimaryGlowSpreadValue.Text = $"Glow spread  {PrimaryGlowSpreadSlider.Value:0} px";
+            PrimaryAudioReactivityValue.Text = $"Audio reactivity  {PrimaryAudioReactivitySlider.Value / 100.0:0.00}x";
+        }
+
+        private void ResetPrimaryDisplaySettings_Click(object sender, RoutedEventArgs e)
+        {
+            _settings.ResetPrimaryScreenSettings();
+            InitSliderValues();
         }
 
         private async void PlayPause_Click(object sender, RoutedEventArgs e)
@@ -1635,6 +1947,12 @@ namespace LmenV2.Views
 
         private async void Window_KeyDown(object sender, KeyEventArgs e)
         {
+            if (_dualDisplayCoverOnly && await HandleSharedShortcutFromSecondaryAsync(e.Key))
+            {
+                e.Handled = true;
+                return;
+            }
+
             if (e.Key == Key.Escape)
             {
                 if (_isColorDropperActive)
@@ -1718,6 +2036,44 @@ namespace LmenV2.Views
                 _volumeService.ToggleMute();
                 ExpandVolumeControl(autoCollapse: true);
                 e.Handled = true;
+            }
+        }
+
+        public async Task<bool> HandleSharedShortcutFromSecondaryAsync(Key key)
+        {
+            switch (key)
+            {
+                case Key.Escape:
+                    _settings.DualDisplayModeEnabled = false;
+                    return true;
+                case Key.F11:
+                    SecondaryFullscreenToggleRequested?.Invoke();
+                    return true;
+                case Key.S:
+                    CycleLyricsTemplate();
+                    return true;
+                case Key.L:
+                    SecondaryLyricsToggleRequested?.Invoke();
+                    return true;
+                case Key.Space:
+                    await _mediaService.TogglePlayPauseAsync();
+                    return true;
+                case Key.Right:
+                    await _mediaService.SkipNextAsync();
+                    return true;
+                case Key.Left:
+                    await _mediaService.SkipPreviousAsync();
+                    return true;
+                case Key.Up:
+                    _volumeService.StepVolume(0.05f);
+                    ExpandVolumeControl(autoCollapse: true);
+                    return true;
+                case Key.Down:
+                    _volumeService.StepVolume(-0.05f);
+                    ExpandVolumeControl(autoCollapse: true);
+                    return true;
+                default:
+                    return false;
             }
         }
 
@@ -1890,6 +2246,8 @@ namespace LmenV2.Views
 
         public void SetRestoredMode(bool restored)
         {
+            if (_dualDisplayCoverOnly && restored) return;
+
             _isRestoredMode = restored;
 
             if (_isRestoredMode)
@@ -2337,8 +2695,11 @@ namespace LmenV2.Views
             _mediaService.PlaybackStateChanged -= OnPlaybackStateChanged;
             _settings.SettingsChanged -= OnSettingsChanged;
             _volumeService.VolumeChanged -= OnSystemVolumeChanged;
+            PrimaryDisplaySettingsPopup.IsOpen = false;
             MotionArtworkService.Instance.VideoCached -= OnMotionVideoCached;
             IsVisibleChanged -= FullscreenVisualizerWindow_IsVisibleChanged;
+            _backdropMeshRenderer?.Dispose();
+            _motionMeshRenderer?.Dispose();
             base.OnClosed(e);
         }
 
@@ -2351,10 +2712,95 @@ namespace LmenV2.Views
             SetLyricsMode(!_isLyricsMode);
         }
 
+        private void PageChangerButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_dualDisplayCoverOnly || _isLyricsMode)
+            {
+                CycleLyricsTemplate();
+                return;
+            }
+            SetLyricsMode(true);
+        }
+
         public void SetLyricsMode(bool enabled)
         {
+            if (_dualDisplayCoverOnly)
+            {
+                if (enabled)
+                {
+                    SecondaryLyricsToggleRequested?.Invoke();
+                }
+                return;
+            }
+
             _isLyricsMode = enabled;
             UpdateLyricsModeUI();
+        }
+
+        public void SetDualDisplayPresentation(bool enabled, DisplayMonitor? coverMonitor = null)
+        {
+            if (enabled != _dualDisplayCoverOnly)
+            {
+                if (enabled)
+                {
+                    _lyricsModeBeforeDualDisplay = _isLyricsMode;
+                    _wasRestoredBeforeDualDisplay = _isRestoredMode;
+                    if (_isRestoredMode)
+                    {
+                        SetRestoredMode(false);
+                    }
+                    if (_isLyricsMode)
+                    {
+                        SetLyricsMode(false);
+                    }
+                    _dualDisplayCoverOnly = true;
+                }
+                else
+                {
+                    _dualDisplayCoverOnly = false;
+                    if (_lyricsModeBeforeDualDisplay)
+                    {
+                        SetLyricsMode(true);
+                    }
+                    _lyricsModeBeforeDualDisplay = false;
+                    if (_wasRestoredBeforeDualDisplay)
+                    {
+                        SetRestoredMode(true);
+                    }
+                    _wasRestoredBeforeDualDisplay = false;
+                }
+            }
+
+            if (enabled && coverMonitor != null && IsLoaded)
+            {
+                Win32Helper.PositionWindowOnMonitor(this, coverMonitor);
+            }
+
+            UpdatePageChangerButtonState();
+        }
+
+        public void CycleLyricsTemplateFromSecondary() => CycleLyricsTemplate();
+
+        public void ToggleTranslationFromSecondary() =>
+            LyricsTranslate_Click(this, new RoutedEventArgs());
+
+        public void ToggleRomanizationFromSecondary() =>
+            LyricsRomanize_Click(this, new RoutedEventArgs());
+
+        public void MoveToMonitor(DisplayMonitor monitor)
+        {
+            if (!_isRestoredMode)
+            {
+                Win32Helper.PositionWindowOnMonitor(this, monitor);
+                return;
+            }
+
+            double monitorWidth = monitor.Bounds.Width / monitor.ScaleX;
+            double monitorHeight = monitor.Bounds.Height / monitor.ScaleY;
+            Width = Math.Min(Width, monitorWidth);
+            Height = Math.Min(Height, monitorHeight);
+            Left = (monitor.Bounds.Left / monitor.ScaleX) + ((monitorWidth - Width) / 2.0);
+            Top = (monitor.Bounds.Top / monitor.ScaleY) + ((monitorHeight - Height) / 2.0);
         }
 
         public void UpdateLyricsButtonAvailability(bool hasLyrics, bool isInstrumental, bool isChecking = false)
@@ -2362,14 +2808,21 @@ namespace LmenV2.Views
             if (LyricsButton != null)
             {
                 LyricsButton.IsEnabled = true;
+                Color accent = _mediaService.CurrentTrack?.AccentColor ?? Color.FromRgb(124, 92, 252);
+                LyricsButton.Background = _isLyricsMode
+                    ? new SolidColorBrush(Color.FromArgb(0x48, accent.R, accent.G, accent.B))
+                    : new SolidColorBrush(Color.FromArgb(0x18, 255, 255, 255));
+                LyricsButton.BorderBrush = _isLyricsMode
+                    ? new SolidColorBrush(Color.FromArgb(0xB8, accent.R, accent.G, accent.B))
+                    : new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
                 if (_isLyricsMode)
                 {
                     LyricsButton.Opacity = 1.0;
                     LyricsButton.Cursor = System.Windows.Input.Cursors.Hand;
-                    LyricsButton.ToolTip = "Close Lyrics Mode (L)";
+                    LyricsButton.ToolTip = "Lyrics";
                     if (LyricsButtonIcon != null)
                     {
-                        LyricsButtonIcon.Foreground = new SolidColorBrush(Color.FromRgb(0, 230, 118));
+                        LyricsButtonIcon.Foreground = new SolidColorBrush(accent);
                     }
                 }
                 else if (isChecking)
@@ -2387,8 +2840,8 @@ namespace LmenV2.Views
                     LyricsButton.Opacity = hasLyrics ? 1.0 : 0.70;
                     LyricsButton.Cursor = System.Windows.Input.Cursors.Hand;
                     LyricsButton.ToolTip = hasLyrics
-                        ? (isInstrumental ? "Instrumental Track (L)" : "Timed Lyrics Mode (L)")
-                        : "Timed Lyrics Mode (L)";
+                        ? (isInstrumental ? "Lyrics (Instrumental)" : "Lyrics")
+                        : "Lyrics";
                     if (LyricsButtonIcon != null)
                     {
                         LyricsButtonIcon.Foreground = hasLyrics
@@ -2405,11 +2858,28 @@ namespace LmenV2.Views
             }
         }
 
+        private void UpdatePageChangerButtonState()
+        {
+            if (PageChangerButton == null) return;
+            Color accent = _mediaService.CurrentTrack?.AccentColor ?? Color.FromRgb(124, 92, 252);
+            bool stageSelected = _isLyricsMode || _dualDisplayCoverOnly;
+            PageChangerButton.Background = stageSelected
+                ? new SolidColorBrush(Color.FromArgb(0x48, accent.R, accent.G, accent.B))
+                : new SolidColorBrush(Color.FromArgb(0x18, 255, 255, 255));
+            PageChangerButton.BorderBrush = stageSelected
+                ? new SolidColorBrush(Color.FromArgb(0xB8, accent.R, accent.G, accent.B))
+                : new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
+            PageChangerButton.ToolTip = stageSelected
+                ? "Cycle Stage Layout"
+                : "Switch Page";
+        }
+
         private void UpdateLyricsModeUI()
         {
             bool hasLyrics = _currentLyrics != null && _currentLyrics.HasLyrics;
             bool isInst = _currentLyrics != null && _currentLyrics.IsInstrumental;
             UpdateLyricsButtonAvailability(hasLyrics, isInst);
+            UpdatePageChangerButtonState();
 
             if (FullscreenLyricsStage == null || VisualizerContentGrid == null) return;
 
@@ -3437,6 +3907,7 @@ namespace LmenV2.Views
                             FontSize = initialFontSize,
                             FontWeight = FontWeights.SemiBold,
                             LineHeight = initialLineHeight,
+                            TextWrapping = TextWrapping.NoWrap,
                             Foreground = _unsungWordBrush,
                             IsHitTestVisible = false
                         };
@@ -3447,6 +3918,7 @@ namespace LmenV2.Views
                             FontSize = initialFontSize,
                             FontWeight = FontWeights.SemiBold,
                             LineHeight = initialLineHeight,
+                            TextWrapping = TextWrapping.NoWrap,
                             Foreground = _sungWordBrush,
                             Visibility = Visibility.Collapsed,
                             RenderTransform = liftTransform,
@@ -3461,7 +3933,7 @@ namespace LmenV2.Views
                         };
                         txt.Inlines.Add(container);
 
-                        if (w < line.Words.Count - 1)
+                        if (word.HasSpaceAfter && w < line.Words.Count - 1)
                         {
                             txt.Inlines.Add(new Run(" ") { Foreground = System.Windows.Media.Brushes.Transparent });
                         }
@@ -3559,6 +4031,7 @@ namespace LmenV2.Views
                                     FontSize = initialFontSize * 0.82,
                                     FontWeight = FontWeights.Medium,
                                     FontStyle = FontStyles.Italic,
+                                    TextWrapping = TextWrapping.NoWrap,
                                     Foreground = _pastLineBrush,
                                     IsHitTestVisible = false
                                 };
@@ -3569,6 +4042,7 @@ namespace LmenV2.Views
                                     FontSize = initialFontSize * 0.82,
                                     FontWeight = FontWeights.Medium,
                                     FontStyle = FontStyles.Italic,
+                                    TextWrapping = TextWrapping.NoWrap,
                                     Foreground = _sungWordBrush,
                                     Visibility = Visibility.Collapsed,
                                     RenderTransform = bgLift,
@@ -3577,7 +4051,7 @@ namespace LmenV2.Views
                                 bgWordGrid.Children.Add(bgDimBlock);
                                 bgWordGrid.Children.Add(bgLitBlock);
                                 txtBg.Inlines.Add(new InlineUIContainer(bgWordGrid) { BaselineAlignment = BaselineAlignment.Baseline });
-                                if (bw < bgLine.Words.Count - 1)
+                                if (bgWord.HasSpaceAfter && bw < bgLine.Words.Count - 1)
                                 {
                                     txtBg.Inlines.Add(new Run(" ") { Foreground = System.Windows.Media.Brushes.Transparent });
                                 }
@@ -4304,14 +4778,23 @@ namespace LmenV2.Views
         {
             if (MotionButton == null) return;
 
+            Color accent = _mediaService.CurrentTrack?.AccentColor ?? Color.FromRgb(124, 92, 252);
+            MotionButton.Background = _isFullscreenMotionActive
+                ? new SolidColorBrush(Color.FromArgb(0x48, accent.R, accent.G, accent.B))
+                : new SolidColorBrush(Color.FromArgb(0x18, 255, 255, 255));
+            MotionButton.BorderBrush = _isFullscreenMotionActive
+                ? new SolidColorBrush(Color.FromArgb(0xB8, accent.R, accent.G, accent.B))
+                : new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
             if (_isMotionAvailable)
             {
                 MotionButton.Opacity = 1.0;
                 if (MotionButtonIcon != null)
                 {
-                    MotionButtonIcon.Foreground = new SolidColorBrush(Color.FromArgb(255, 68, 255, 212)); // Glowing neon cyan/mint
+                    MotionButtonIcon.Foreground = new SolidColorBrush(_isFullscreenMotionActive
+                        ? accent
+                        : Color.FromArgb(235, 255, 255, 255));
                 }
-                MotionButton.ToolTip = "Fullscreen Animated Album Cover (Active - M / Double-click)";
+                MotionButton.ToolTip = "Cover";
             }
             else
             {
@@ -4320,7 +4803,7 @@ namespace LmenV2.Views
                 {
                     MotionButtonIcon.Foreground = new SolidColorBrush(Color.FromArgb(220, 255, 255, 255));
                 }
-                MotionButton.ToolTip = "Fullscreen Animated Album Cover / Canvas (M / Double-click)";
+                MotionButton.ToolTip = "Cover";
             }
         }
 
@@ -4338,7 +4821,7 @@ namespace LmenV2.Views
             var thumb = AlbumCoverImage?.Source as BitmapSource ?? _mediaService.CurrentTrack?.Thumbnail;
             if (thumb != null)
             {
-                _currentBlurredBackdrop = BackdropBlur.CreateBlurredBackdrop(thumb);
+                _currentBlurredBackdrop = CreateBlurredBackdrop(thumb);
                 MotionBlurredBackdrop.Source = _currentBlurredBackdrop ?? thumb;
             }
             else

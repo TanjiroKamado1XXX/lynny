@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Media;
 using LmenV2.Helpers;
@@ -23,8 +22,10 @@ namespace LmenV2.Views
         private double _breathPhase = 0.0;
         private double _beatExcitement = 0.0;
 
-        private readonly Stopwatch _renderTimer = new Stopwatch();
-        private TimeSpan _lastFrameTime = TimeSpan.Zero;
+        private TimeSpan _lastRenderingTime = TimeSpan.MinValue;
+        private TimeSpan _lastTaskbarHoverCheck = TimeSpan.MinValue;
+        private bool _renderingPaused;
+        private bool _renderSubscribed;
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern bool GetCursorPos(out Win32Point lpPoint);
@@ -72,13 +73,7 @@ namespace LmenV2.Views
 
             _mediaService.TrackUpdated += OnTrackUpdated;
             _settings.SettingsChanged += OnSettingsChanged;
-            IsVisibleChanged += (s, e) =>
-            {
-                if (IsVisible)
-                {
-                    EnsureTaskbarAboveOverlay();
-                }
-            };
+            IsVisibleChanged += OnVisibilityChanged;
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -101,9 +96,41 @@ namespace LmenV2.Views
             _beam.SetTargetColor(_mediaService.CurrentTrack.DominantColor);
             _beam.EaseColor(1.0);
 
-            _renderTimer.Start();
-            _lastFrameTime = _renderTimer.Elapsed;
-            CompositionTarget.Rendering += OnRenderFrame;
+            _lastRenderingTime = TimeSpan.MinValue;
+            UpdateRenderingSubscription();
+        }
+
+        public void SetRenderingPaused(bool paused)
+        {
+            if (_renderingPaused == paused) return;
+            _renderingPaused = paused;
+            UpdateRenderingSubscription();
+        }
+
+        private void OnVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (IsVisible)
+            {
+                EnsureTaskbarAboveOverlay();
+            }
+            UpdateRenderingSubscription();
+        }
+
+        private void UpdateRenderingSubscription()
+        {
+            bool shouldSubscribe = IsLoaded && IsVisible && !_renderingPaused;
+            if (shouldSubscribe && !_renderSubscribed)
+            {
+                _lastRenderingTime = TimeSpan.MinValue;
+                _lastTaskbarHoverCheck = TimeSpan.MinValue;
+                CompositionTarget.Rendering += OnRenderFrame;
+                _renderSubscribed = true;
+            }
+            else if (!shouldSubscribe && _renderSubscribed)
+            {
+                CompositionTarget.Rendering -= OnRenderFrame;
+                _renderSubscribed = false;
+            }
         }
 
         private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -138,16 +165,15 @@ namespace LmenV2.Views
         {
             if (!IsVisible || WindowState == WindowState.Minimized) return;
 
-            // Ensure Windows Taskbar stays immediately accessible and responsive on bottom hover
-            UpdateTaskbarHover();
+            if (!RenderFrameClock.TryGetDeltaTime(e, ref _lastRenderingTime, out double dt)) return;
+            if (_lastTaskbarHoverCheck == TimeSpan.MinValue ||
+                (_lastRenderingTime - _lastTaskbarHoverCheck).TotalMilliseconds >= 100.0)
+            {
+                _lastTaskbarHoverCheck = _lastRenderingTime;
+                UpdateTaskbarHover();
+            }
 
-            var now = _renderTimer.Elapsed;
-            double dt = (now - _lastFrameTime).TotalSeconds;
-            _lastFrameTime = now;
-
-            if (dt <= 0.0 || dt > 0.1) dt = 0.016;
-
-            float rawEnergy = _audioService.CurrentEnergy;
+            float rawEnergy = _audioService.SmoothedEnergy;
             double speedMultiplier = _settings.RotationSpeed;
 
             // Track dynamic kick & bass excitement for the "excited jump" effect
@@ -271,6 +297,7 @@ namespace LmenV2.Views
         protected override void OnClosed(EventArgs e)
         {
             CompositionTarget.Rendering -= OnRenderFrame;
+            _renderSubscribed = false;
             _mediaService.TrackUpdated -= OnTrackUpdated;
             _settings.SettingsChanged -= OnSettingsChanged;
             base.OnClosed(e);

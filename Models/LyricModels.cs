@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 
 namespace LmenV2.Models
 {
@@ -35,7 +36,7 @@ namespace LmenV2.Models
                 .OrderBy(p => p.StartChar)
                 .ToList();
 
-            if (usable.Count < 2) return new List<LyricSyllable>();
+            if (usable.Count == 0) return new List<LyricSyllable>();
 
             var result = new List<LyricSyllable>(usable.Count);
             for (int i = 0; i < usable.Count; i++)
@@ -53,6 +54,7 @@ namespace LmenV2.Models
     {
         public int Index { get; set; }
         public string Text { get; set; } = string.Empty;
+        public bool HasSpaceAfter { get; set; }
         public TimeSpan StartTime { get; set; }
         public TimeSpan EndTime { get; set; }
         public List<LyricSyllable> Syllables { get; set; } = new List<LyricSyllable>();
@@ -103,6 +105,23 @@ namespace LmenV2.Models
         public bool HasWordSync => Words != null && Words.Count > 0;
         public bool IsActive { get; set; }
         public bool IsPast { get; set; }
+
+        public static string ComposeText(IReadOnlyList<LyricWord> words)
+        {
+            if (words == null || words.Count == 0) return string.Empty;
+
+            var text = new StringBuilder();
+            for (int i = 0; i < words.Count; i++)
+            {
+                text.Append(words[i].Text);
+                if (i < words.Count - 1 && words[i].HasSpaceAfter)
+                {
+                    text.Append(' ');
+                }
+            }
+
+            return text.ToString();
+        }
 
         public bool HasKnownEnd => (Words != null && Words.Count > 0) || SungUntil.HasValue;
 

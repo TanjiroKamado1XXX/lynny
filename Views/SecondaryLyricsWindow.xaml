@@ -1,0 +1,286 @@
+<Window x:Class="LmenV2.Views.SecondaryLyricsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Nyx - Synchronized Lyrics"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        WindowState="Normal"
+        Topmost="True"
+        ShowInTaskbar="False"
+        Background="#070910"
+        PreviewKeyDown="Window_KeyDown"
+        MouseMove="Window_MouseMove"
+        PreviewMouseMove="Window_PreviewMouseMove"
+        Activated="Window_Activated"
+        IsVisibleChanged="Window_IsVisibleChanged"
+        Loaded="Window_Loaded"
+        Closing="Window_Closing"
+        SizeChanged="Window_SizeChanged">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="NyxControlStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+    <Grid ClipToBounds="True">
+        <Grid x:Name="SecondaryVisualsRoot" ClipToBounds="True">
+        <Image x:Name="BackdropImage"
+               Stretch="UniformToFill"
+               Opacity="0.28"
+               IsHitTestVisible="False"
+               RenderOptions.BitmapScalingMode="Linear"/>
+        <Rectangle x:Name="BackdropDimmingOverlay"
+                   Fill="#FF070910"
+                   Opacity="0"
+                   IsHitTestVisible="False"/>
+        <Rectangle x:Name="PaletteTint" Opacity="0.24" IsHitTestVisible="False">
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                    <GradientStop Color="#B5070910" Offset="0"/>
+                    <GradientStop Color="#E8070910" Offset="0.55"/>
+                    <GradientStop Color="#F7070910" Offset="1"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+        <Rectangle IsHitTestVisible="False">
+            <Rectangle.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Color="#14000000" Offset="0"/>
+                    <GradientStop Color="#70000000" Offset="0.68"/>
+                    <GradientStop Color="#E8070910" Offset="1"/>
+                </RadialGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+
+        <Canvas x:Name="KineticLyricsCanvas"
+                ClipToBounds="True"
+                Visibility="Collapsed"
+                IsHitTestVisible="False"/>
+
+        <ScrollViewer x:Name="PlainLyricsViewer"
+                      VerticalScrollBarVisibility="Hidden"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Margin="90,130,90,90"
+                      Visibility="Collapsed"
+                      IsHitTestVisible="False">
+            <TextBlock x:Name="PlainLyricsText"
+                       FontFamily="Segoe UI, Inter, Arial"
+                       FontSize="32"
+                       FontWeight="SemiBold"
+                       LineHeight="54"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Foreground="#E8F7F8FF">
+                <TextBlock.Effect>
+                    <DropShadowEffect Color="#090B10" BlurRadius="18" ShadowDepth="2" Opacity="0.55"/>
+                </TextBlock.Effect>
+            </TextBlock>
+        </ScrollViewer>
+
+        <Border x:Name="StageStatusPanel"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="#48111420"
+                BorderBrush="#35FFFFFF"
+                BorderThickness="1"
+                CornerRadius="18"
+                Padding="24,14"
+                Visibility="Visible"
+                IsHitTestVisible="False">
+            <TextBlock x:Name="StageStatusText"
+                       Text="Waiting for synchronized lyrics"
+                       Foreground="#D8DBEA"
+                       FontSize="17"
+                       FontWeight="Medium"
+                       TextAlignment="Center"/>
+        </Border>
+
+        <Grid x:Name="HeaderBar"
+              VerticalAlignment="Top"
+              Margin="42,28,42,0"
+              Panel.ZIndex="30">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" VerticalAlignment="Top" Margin="0,0,20,0">
+                    <TextBlock x:Name="SongTitleText"
+                               Text="Ready to Play"
+                               Foreground="#F7F8FF"
+                               FontSize="18"
+                               FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis">
+                        <TextBlock.Effect>
+                            <DropShadowEffect Color="#090B10" BlurRadius="18" ShadowDepth="2" Opacity="0.55"/>
+                        </TextBlock.Effect>
+                    </TextBlock>
+                    <TextBlock x:Name="ArtistText"
+                               Text="Play music to begin"
+                               Foreground="#B8C0D8"
+                               FontSize="13"
+                               Margin="0,4,0,0"/>
+                    <TextBlock x:Name="TransformStatusText"
+                               Foreground="#C5A8FF"
+                               FontSize="11"
+                               Margin="0,5,0,0"/>
+                </StackPanel>
+
+                <StackPanel x:Name="HeaderActionsBar"
+                            Grid.Column="1"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Top"
+                            Opacity="1">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="SecondaryDisplaySettingsButton"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="0,0,8,0"
+                                Click="SecondaryDisplaySettingsButton_Click"
+                                ToolTip="Secondary Display Settings"
+                                AutomationProperties.Name="Secondary Display Settings">
+                            <TextBlock Text="&#xE770;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" FontSize="13"/>
+                        </Button>
+                        <Button x:Name="PreviousTrackButton"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="0,0,6,0"
+                                Click="PreviousTrackButton_Click"
+                                ToolTip="Previous track">
+                            <TextBlock Text="&#xE892;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" FontSize="13"/>
+                        </Button>
+                        <Button x:Name="PlayPauseTrackButton"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="0,0,6,0"
+                                Click="PlayPauseTrackButton_Click"
+                                ToolTip="Play or pause">
+                            <TextBlock x:Name="PlayPauseTrackIcon" Text="&#xE768;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" FontSize="13"/>
+                        </Button>
+                        <Button x:Name="NextTrackButton"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="0,0,10,0"
+                                Click="NextTrackButton_Click"
+                                ToolTip="Next track">
+                            <TextBlock Text="&#xE893;" FontFamily="Segoe MDL2 Assets, Segoe UI Symbol" FontSize="13"/>
+                        </Button>
+                        <ComboBox x:Name="LanguageComboBox"
+                                  Width="138"
+                                  Height="32"
+                                  Margin="0,0,8,0"
+                                  Background="#E6100A12"
+                                  Foreground="#F7F8FF"
+                                  BorderBrush="#3DFFFFFF"
+                                  BorderThickness="1"
+                                  SelectionChanged="LanguageComboBox_SelectionChanged"
+                                  ToolTip="Translation language"/>
+                        <Button x:Name="TranslateButton"
+                                Content="TRANSLATE"
+                                Style="{StaticResource LyricsChipButton}"
+                                Click="TranslateButton_Click"
+                                Margin="0,0,8,0"
+                                ToolTip="Toggle translation"/>
+                        <Button x:Name="RomanizeButton"
+                                Content="ROMANIZE"
+                                Style="{StaticResource LyricsChipButton}"
+                                Click="RomanizeButton_Click"
+                                ToolTip="Toggle romanization"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                        <Button x:Name="StyleButton"
+                                Content="SLIDE"
+                                Style="{StaticResource LyricsChipButton}"
+                                Click="StyleButton_Click"
+                                Margin="0,0,8,0"
+                                ToolTip="Switch lyric style (S)"/>
+                        <Button Content="−"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="0,0,5,0"
+                                Click="DecreaseOffsetButton_Click"
+                                ToolTip="Lyrics earlier by 50 ms"/>
+                        <TextBlock x:Name="OffsetValueText"
+                                   Text="0 ms"
+                                   Width="55"
+                                   Foreground="#D8DBEA"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   TextAlignment="Center"/>
+                        <Button Content="+"
+                                Style="{StaticResource FrostedMiniCircleButton}"
+                                Margin="5,0,10,0"
+                                Click="IncreaseOffsetButton_Click"
+                                ToolTip="Lyrics later by 50 ms"/>
+                        <Button Content="SWAP"
+                                Style="{StaticResource LyricsChipButton}"
+                                Margin="0,0,8,0"
+                                Click="SwapDisplaysButton_Click"
+                                ToolTip="Swap cover and lyrics displays"/>
+                        <Button Content="CLOSE"
+                                Style="{StaticResource LyricsExitChipButton}"
+                                Click="ExitButton_Click"
+                                ToolTip="Exit dual display mode (Esc)"/>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <Grid x:Name="EdgeBeamHost"
+             IsHitTestVisible="False"
+             Panel.ZIndex="20"/>
+        </Grid>
+        <Popup x:Name="SecondaryDisplaySettingsPopup"
+               PlacementTarget="{Binding ElementName=SecondaryDisplaySettingsButton}"
+               Placement="Bottom"
+               HorizontalOffset="-292"
+               VerticalOffset="8"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               PopupAnimation="Fade"
+               Opened="SecondaryDisplaySettingsPopup_Opened"
+               Closed="SecondaryDisplaySettingsPopup_Closed">
+            <Border Width="320"
+                    Padding="18"
+                    Background="#F20B0A15"
+                    BorderBrush="#667C5CFC"
+                    BorderThickness="1"
+                    CornerRadius="18"
+                    PreviewKeyDown="DisplaySettingsPopup_PreviewKeyDown">
+                <Border.Effect>
+                    <DropShadowEffect Color="#090B10" BlurRadius="28" ShadowDepth="8" Opacity="0.62"/>
+                </Border.Effect>
+                <StackPanel>
+                    <TextBlock Text="SECONDARY DISPLAY"
+                               Foreground="#F7F4FF"
+                               FontSize="12"
+                               FontWeight="Bold"
+                               Margin="0,0,0,12"/>
+                    <TextBlock x:Name="SecondaryBrightnessValue" Foreground="#D8DBEA" FontSize="11"/>
+                    <Slider x:Name="SecondaryBrightnessSlider" Minimum="50" Maximum="150" Value="100" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <TextBlock x:Name="SecondaryContrastValue" Foreground="#D8DBEA" FontSize="11" Margin="0,7,0,0"/>
+                    <Slider x:Name="SecondaryContrastSlider" Minimum="50" Maximum="150" Value="100" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <TextBlock x:Name="SecondaryDimmingValue" Foreground="#D8DBEA" FontSize="11" Margin="0,7,0,0"/>
+                    <Slider x:Name="SecondaryDimmingSlider" Minimum="0" Maximum="100" Value="30" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <CheckBox x:Name="SecondaryGlowEnabledCheckBox"
+                              Content="Enable secondary glow"
+                              Foreground="#E8E4F3"
+                              Margin="0,12,0,4"
+                              Checked="SecondaryGlowEnabled_Changed"
+                              Unchecked="SecondaryGlowEnabled_Changed"/>
+                    <TextBlock x:Name="SecondaryGlowBrightnessValue" Foreground="#D8DBEA" FontSize="11"/>
+                    <Slider x:Name="SecondaryGlowBrightnessSlider" Minimum="0" Maximum="150" Value="85" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <TextBlock x:Name="SecondaryGlowSpreadValue" Foreground="#D8DBEA" FontSize="11" Margin="0,7,0,0"/>
+                    <Slider x:Name="SecondaryGlowSpreadSlider" Minimum="20" Maximum="300" Value="110" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <TextBlock x:Name="SecondaryAudioReactivityValue" Foreground="#D8DBEA" FontSize="11" Margin="0,7,0,0"/>
+                    <Slider x:Name="SecondaryAudioReactivitySlider" Minimum="0" Maximum="250" Value="100" Foreground="#A88BFF" ValueChanged="SecondaryScreenSlider_ValueChanged"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+                        <Button Content="Copy from Primary"
+                                Style="{StaticResource LyricsChipButton}"
+                                Margin="0,0,8,0"
+                                Click="CopyPrimaryDisplaySettings_Click"/>
+                        <Button Content="Reset"
+                                Style="{StaticResource LyricsChipButton}"
+                                Click="ResetSecondaryDisplaySettings_Click"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Popup>
+    </Grid>
+</Window>

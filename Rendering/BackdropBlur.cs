@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
@@ -7,19 +9,43 @@ namespace LmenV2.Rendering
     /// <summary>
     /// Generates silky-smooth diffuse ambient background textures from album artwork.
     ///
-    /// By downscaling to ~130px and applying a multi-pass separable box blur (Gaussian equivalent),
-    /// the texture is generated in under 3 ms and frozen. When displayed in WPF with
+    /// By downscaling to 240px by default (144px in low-latency mode) and applying a
+    /// separable box blur, the texture is generated once per artwork/quality pair and frozen.
+    /// When displayed in WPF with
     /// RenderOptions.BitmapScalingMode="Linear", Direct3D's bilinear texture sampler hardware
     /// provides flawless full-screen blur with 0% CPU and 60+ FPS during animation.
     /// </summary>
     public static class BackdropBlur
     {
-        public static BitmapSource? CreateBlurredBackdrop(BitmapSource? src, int targetSize = 240, int blurRadius = 6)
+        private static readonly BitmapSource FallbackBackdrop = CreateFallbackTexture();
+        private static readonly object CacheLock = new object();
+        private static readonly ConditionalWeakTable<BitmapSource, Dictionary<(int TargetSize, int BlurRadius, int Passes), BitmapSource>> Cache = new();
+
+        public static BitmapSource GetFallbackBackdrop() => FallbackBackdrop;
+
+        public static BitmapSource? CreateBlurredBackdrop(BitmapSource? src, int targetSize = 240, int blurRadius = 6, int passes = 3)
         {
             if (src == null) return null;
 
             try
             {
+                targetSize = Math.Clamp(targetSize, 64, 512);
+                blurRadius = Math.Clamp(blurRadius, 4, 30);
+                passes = Math.Clamp(passes, 1, 3);
+
+                var cacheKey = (targetSize, blurRadius, passes);
+                if (src.IsFrozen)
+                {
+                    lock (CacheLock)
+                    {
+                        if (Cache.TryGetValue(src, out var cachedImages) &&
+                            cachedImages.TryGetValue(cacheKey, out var cachedImage))
+                        {
+                            return cachedImage;
+                        }
+                    }
+                }
+
                 int srcW = src.PixelWidth;
                 int srcH = src.PixelHeight;
                 if (srcW <= 0 || srcH <= 0) return null;
@@ -43,8 +69,8 @@ namespace LmenV2.Rendering
                 byte[] temp = new byte[pixels.Length];
 
                 // 3 passes of horizontal and vertical sliding box blur = Gaussian curve
-                int r = Math.Clamp(blurRadius, 4, 30);
-                for (int p = 0; p < 3; p++)
+                int r = blurRadius;
+                for (int p = 0; p < passes; p++)
                 {
                     BoxBlurH(pixels, temp, w, h, r);
                     BoxBlurV(temp, pixels, w, h, r);
@@ -52,6 +78,14 @@ namespace LmenV2.Rendering
 
                 var blurred = BitmapSource.Create(w, h, 96, 96, PixelFormats.Bgra32, null, pixels, stride);
                 blurred.Freeze();
+                if (src.IsFrozen)
+                {
+                    lock (CacheLock)
+                    {
+                        var cachedImages = Cache.GetValue(src, _ => new Dictionary<(int, int, int), BitmapSource>());
+                        cachedImages[cacheKey] = blurred;
+                    }
+                }
                 return blurred;
             }
             catch (Exception ex)
@@ -59,6 +93,37 @@ namespace LmenV2.Rendering
                 System.Diagnostics.Debug.WriteLine($"[BackdropBlur] Generation failed: {ex.Message}");
                 return null;
             }
+        }
+
+        private static BitmapSource CreateFallbackTexture()
+        {
+            const int width = 128;
+            const int height = 72;
+            const int stride = width * 4;
+            var pixels = new byte[height * stride];
+
+            for (int y = 0; y < height; y++)
+            {
+                double ny = (y / (double)(height - 1)) - 0.5;
+                for (int x = 0; x < width; x++)
+                {
+                    double nx = (x / (double)(width - 1)) - 0.5;
+                    double radius = Math.Sqrt((nx * nx * 0.8) + (ny * ny * 1.6));
+                    double glow = Math.Max(0.0, 1.0 - radius * 2.2);
+                    byte r = (byte)(9 + (glow * 12));
+                    byte g = (byte)(11 + (glow * 13));
+                    byte b = (byte)(16 + (glow * 22));
+                    int index = (y * stride) + (x * 4);
+                    pixels[index] = b;
+                    pixels[index + 1] = g;
+                    pixels[index + 2] = r;
+                    pixels[index + 3] = 255;
+                }
+            }
+
+            var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, stride);
+            bitmap.Freeze();
+            return bitmap;
         }
 
         private static void BoxBlurH(byte[] src, byte[] dst, int w, int h, int r)

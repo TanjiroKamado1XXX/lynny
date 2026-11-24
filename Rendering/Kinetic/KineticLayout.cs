@@ -2,12 +2,20 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Media;
 using LmenV2.Models;
 
 namespace LmenV2.Rendering.Kinetic
 {
     public static class KineticLayout
     {
+        private const int MeasurementCacheLimit = 4096;
+        private static readonly object MeasurementCacheLock = new object();
+        private static readonly Dictionary<string, double> VisualLengthCache = new Dictionary<string, double>(StringComparer.Ordinal);
+        private static readonly Dictionary<(string FontFamily, int FontWeight, double FontSize, string Culture), double> WordSpaceWidthCache =
+            new Dictionary<(string, int, double, string), double>();
+
         private static readonly Regex EnergeticRegex = new Regex(
             @"rock|metal|punk|hip.?hop|rap|electronic|dance|edm|house|techno|drum|dubstep|k-pop|anime|pop",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -57,6 +65,15 @@ namespace LmenV2.Rendering.Kinetic
         public static double VisualLength(string s)
         {
             if (string.IsNullOrEmpty(s)) return 0.5;
+
+            lock (MeasurementCacheLock)
+            {
+                if (VisualLengthCache.TryGetValue(s, out double cachedLength))
+                {
+                    return cachedLength;
+                }
+            }
+
             double n = 0;
             string upper = s.ToUpperInvariant();
             foreach (char ch in upper)
@@ -70,7 +87,71 @@ namespace LmenV2.Rendering.Kinetic
                 else if (char.IsDigit(ch)) n += 0.66;
                 else n += 0.72;
             }
-            return Math.Max(n, 0.5);
+            double length = Math.Max(n, 0.5);
+            lock (MeasurementCacheLock)
+            {
+                if (VisualLengthCache.Count >= MeasurementCacheLimit)
+                {
+                    VisualLengthCache.Clear();
+                }
+                VisualLengthCache[s] = length;
+            }
+            return length;
+        }
+
+        public const double DefaultWordSpaceWidth = 0.25;
+
+        public static double WordSpaceWidth(FontFamily fontFamily, FontWeight fontWeight, double fontSize)
+        {
+            if (fontSize <= 0.0) return 0.0;
+
+            var cacheKey = (fontFamily.Source, fontWeight.ToOpenTypeWeight(), fontSize, CultureInfo.CurrentUICulture.Name);
+            lock (MeasurementCacheLock)
+            {
+                if (WordSpaceWidthCache.TryGetValue(cacheKey, out double cachedWidth))
+                {
+                    return cachedWidth;
+                }
+            }
+
+            var formattedText = new FormattedText(
+                " ",
+                CultureInfo.CurrentUICulture,
+                System.Windows.FlowDirection.LeftToRight,
+                new Typeface(fontFamily, FontStyles.Normal, fontWeight, FontStretches.Normal),
+                fontSize,
+                Brushes.White,
+                1.0);
+            double width = formattedText.WidthIncludingTrailingWhitespace;
+            lock (MeasurementCacheLock)
+            {
+                if (WordSpaceWidthCache.Count >= MeasurementCacheLimit)
+                {
+                    WordSpaceWidthCache.Clear();
+                }
+                WordSpaceWidthCache[cacheKey] = width;
+            }
+            return width;
+        }
+
+        /// <summary>
+        /// Measures whole words as indivisible layout items, adding a space only where
+        /// the source marks one. Syllable spans never add gaps or wrap points.
+        /// </summary>
+        public static double RowVisualLength(
+            IReadOnlyList<LyricWord> words,
+            double wordSpaceWidth = DefaultWordSpaceWidth)
+        {
+            double length = 0.0;
+            for (int i = 0; i < words.Count; i++)
+            {
+                length += VisualLength(words[i].Text);
+                if (i < words.Count - 1 && words[i].HasSpaceAfter)
+                {
+                    length += wordSpaceWidth;
+                }
+            }
+            return length;
         }
 
         /// <summary>
@@ -87,6 +168,7 @@ namespace LmenV2.Rendering.Kinetic
 
         /// <summary>
         /// Group lyric words into short rows of at most two words (rarely three).
+        /// Each LyricWord remains a single item regardless of its syllable count.
         /// Rows are split in reading order; width is no longer used to pack more words
         /// onto a line, so the layout never has to shrink or squish the type.
         /// </summary>

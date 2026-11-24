@@ -1,0 +1,180 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Color x:Key="NyxAccentColor">#7C5CFC</Color>
+    <Color x:Key="NyxAccentDarkColor">#4C36A8</Color>
+    <Color x:Key="NyxAccentSoftColor">#487C5CFC</Color>
+    <SolidColorBrush x:Key="NyxAccentBrush" Color="{DynamicResource NyxAccentColor}"/>
+    <SolidColorBrush x:Key="NyxAccentSoftBrush" Color="{DynamicResource NyxAccentSoftColor}"/>
+
+    <Style x:Key="LyricsChipButton" TargetType="Button">
+        <Setter Property="Foreground" Value="#F2FFFFFF"/>
+        <Setter Property="FontSize" Value="10.5"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Padding" Value="12,6"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <ScaleTransform x:Name="chipScale" ScaleX="1" ScaleY="1"/>
+                        </Grid.RenderTransform>
+                        <Border CornerRadius="999">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="#E6100A12" Offset="0"/>
+                                    <GradientStop Color="#D9080509" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <Border.Effect>
+                                <DropShadowEffect Color="#090B10" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/>
+                            </Border.Effect>
+                        </Border>
+                        <Border x:Name="chipRim"
+                                CornerRadius="999"
+                                BorderThickness="1"
+                                BorderBrush="{DynamicResource NyxAccentSoftBrush}"
+                                Background="#00000000"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="chipRim" Property="BorderBrush" Value="{DynamicResource NyxAccentBrush}"/>
+                            <Setter TargetName="chipRim" Property="Background" Value="{DynamicResource NyxAccentSoftBrush}"/>
+                            <Setter Property="Foreground" Value="#FFFFFFFF"/>
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="chipScale" Storyboard.TargetProperty="ScaleX" To="1.05" Duration="0:0:0.12"/>
+                                        <DoubleAnimation Storyboard.TargetName="chipScale" Storyboard.TargetProperty="ScaleY" To="1.05" Duration="0:0:0.12"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="chipScale" Storyboard.TargetProperty="ScaleX" To="1.0" Duration="0:0:0.16"/>
+                                        <DoubleAnimation Storyboard.TargetProperty="ScaleY" Storyboard.TargetName="chipScale" To="1.0" Duration="0:0:0.16"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="chipRim" Property="Background" Value="{DynamicResource NyxAccentSoftBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="LyricsExitChipButton" TargetType="Button">
+        <Setter Property="Foreground" Value="#FFFFFFFF"/>
+        <Setter Property="FontSize" Value="10.5"/>
+        <Setter Property="FontWeight" Value="Bold"/>
+        <Setter Property="Padding" Value="14,6"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <ScaleTransform x:Name="exitScale" ScaleX="1" ScaleY="1"/>
+                        </Grid.RenderTransform>
+                        <Border x:Name="exitFill" CornerRadius="999">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="{DynamicResource NyxAccentColor}" Offset="0"/>
+                                    <GradientStop Color="{DynamicResource NyxAccentDarkColor}" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <Border.Effect>
+                                <DropShadowEffect Color="{DynamicResource NyxAccentColor}" BlurRadius="18" ShadowDepth="0" Opacity="0.55"/>
+                            </Border.Effect>
+                        </Border>
+                        <Border x:Name="exitRim"
+                                CornerRadius="999"
+                                BorderThickness="1"
+                                BorderBrush="#66FFFFFF"
+                                Background="#00000000"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="exitRim" Property="BorderBrush" Value="#AAFFFFFF"/>
+                            <Trigger.EnterActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="exitScale" Storyboard.TargetProperty="ScaleX" To="1.05" Duration="0:0:0.12"/>
+                                        <DoubleAnimation Storyboard.TargetName="exitScale" Storyboard.TargetProperty="ScaleY" To="1.05" Duration="0:0:0.12"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.EnterActions>
+                            <Trigger.ExitActions>
+                                <BeginStoryboard>
+                                    <Storyboard>
+                                        <DoubleAnimation Storyboard.TargetName="exitScale" Storyboard.TargetProperty="ScaleX" To="1.0" Duration="0:0:0.16"/>
+                                        <DoubleAnimation Storyboard.TargetName="exitScale" Storyboard.TargetProperty="ScaleY" To="1.0" Duration="0:0:0.16"/>
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </Trigger.ExitActions>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="exitFill" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="FrostedMiniCircleButton" TargetType="Button">
+        <Setter Property="Background" Value="#18FFFFFF"/>
+        <Setter Property="Foreground" Value="#D8FFFFFF"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="BorderBrush" Value="#22FFFFFF"/>
+        <Setter Property="Width" Value="32"/>
+        <Setter Property="Height" Value="32"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="circle"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="16">
+                        <Border.Effect>
+                            <DropShadowEffect Color="#090B10" BlurRadius="10" ShadowDepth="2" Opacity="0.22"/>
+                        </Border.Effect>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="circle" Property="Background" Value="#2DFFFFFF"/>
+                            <Setter TargetName="circle" Property="BorderBrush" Value="#40FFFFFF"/>
+                            <Setter Property="Foreground" Value="#FFFFFFFF"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="circle" Property="Background" Value="#45FFFFFF"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="circle" Property="Opacity" Value="0.32"/>
+                            <Setter Property="Foreground" Value="#45FFFFFF"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

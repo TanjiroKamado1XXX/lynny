@@ -605,7 +605,7 @@ namespace LmenV2.Services
                             .Where(e => e.ValueKind == JsonValueKind.Object)
                             .Select(e => StringProp(e, "text"))
                             .Where(t => !string.IsNullOrWhiteSpace(t))
-                            .Select(t => t!.Trim())
+                            .Select(t => t!)
                             .ToList();
                         if (texts.Count == 0) continue;
 
@@ -616,7 +616,7 @@ namespace LmenV2.Services
                         {
                             var word = wordElements[wi];
                             if (word.ValueKind != JsonValueKind.Object) continue;
-                            string? text = StringProp(word, "text")?.Trim();
+                            string? text = StringProp(word, "text");
                             if (string.IsNullOrEmpty(text)) continue;
                             long? wStart = LongProp(word, "timestamp");
                             if (wStart == null) continue;
@@ -633,13 +633,13 @@ namespace LmenV2.Services
                         }
 
                         var timed = SyllableRuns.WordsFromRuns(runs, spacingIsExplicit: true);
-                        bool untimed = runs.Count != texts.Count;
+                        bool untimed = runs.Count(run => !string.IsNullOrWhiteSpace(run.Raw)) != texts.Count;
 
                         var line = new LyricLine
                         {
                             StartTime = TimeSpan.FromMilliseconds(Math.Min(start, timed.Count > 0 ? (long)timed[0].StartTime.TotalMilliseconds : start)),
                             EndTime = TimeSpan.FromMilliseconds(nextLine ?? (timed.Count > 0 ? (long)timed[^1].EndTime.TotalMilliseconds : start)),
-                            Text = untimed ? string.Join(" ", texts) : string.Join(" ", timed.Select(w => w.Text)),
+                            Text = untimed ? string.Join(" ", texts.Select(text => text.Trim())) : LyricLine.ComposeText(timed),
                             Words = untimed ? new List<LyricWord>() : timed,
                             SungUntil = nextLine.HasValue ? TimeSpan.FromMilliseconds(nextLine.Value) : (TimeSpan?)null
                         };
@@ -1225,9 +1225,9 @@ namespace LmenV2.Services
                         runs.Add(new TimedRun(start, Math.Max(start, Math.Min(lineEnd, next)), fragment.Text));
                     }
 
-                    var words = SyllableRuns.WordsFromRuns(runs, spacingIsExplicit: true);
                     string text = entry.Text.Trim();
-                    if (text.Length == 0) text = string.Join(" ", words.Select(w => w.Text));
+                    var words = SyllableRuns.WordsFromRuns(runs, spacingIsExplicit: true, sourceText: entry.Text);
+                    if (text.Length == 0) text = LyricLine.ComposeText(words);
                     if (text.Length == 0) continue;
 
                     result.Add(new LyricLine

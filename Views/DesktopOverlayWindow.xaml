@@ -1,7 +1,7 @@
 <Window x:Class="LmenV2.Views.DesktopOverlayWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Lmen v2 - Desktop Edge Overlay"
+        Title="Nyx - Desktop Edge Overlay"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"

@@ -13,12 +13,16 @@ namespace LmenV2.Services
         private DateTime _lastObservedUtc = DateTime.UtcNow;
         private bool _wasPlaying = false;
         private const double SeekDiscontinuitySeconds = 1.25;
+        private const double RestartPositionSeconds = 1.5;
+
+        public bool LastUpdateWasRestart { get; private set; }
 
         public void Reset(TimeSpan initialPosition, bool isPlaying)
         {
             _lastReported = initialPosition;
             _lastObservedUtc = DateTime.UtcNow;
             _wasPlaying = isPlaying;
+            LastUpdateWasRestart = false;
         }
 
         public TimeSpan Reconcile(TimeSpan displayedTime, TimeSpan reportedTime, bool isPlaying)
@@ -29,6 +33,11 @@ namespace LmenV2.Services
 
             var expected = _lastReported + (_wasPlaying ? elapsed : TimeSpan.Zero);
             bool discontinuity = !isPlaying || Math.Abs((reportedTime - expected).TotalSeconds) > SeekDiscontinuitySeconds;
+            LastUpdateWasRestart = isPlaying &&
+                _wasPlaying &&
+                _lastReported.TotalSeconds > SeekDiscontinuitySeconds &&
+                reportedTime.TotalSeconds <= RestartPositionSeconds &&
+                displayedTime.TotalSeconds > SeekDiscontinuitySeconds;
 
             _lastReported = reportedTime;
             _lastObservedUtc = now;

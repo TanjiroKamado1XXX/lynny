@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Shapes;
@@ -17,6 +18,7 @@ namespace LmenV2.Rendering.Kinetic
     /// </summary>
     public sealed class KineticStageRenderer
     {
+        private const double TitleIntroDurationSeconds = 4.0;
         private readonly Canvas _hostCanvas;
         private readonly Canvas _cameraCanvas;
         private readonly Canvas _rippleCanvas;
@@ -32,9 +34,15 @@ namespace LmenV2.Rendering.Kinetic
         private KineticPalette _palette = KineticPalette.CreateFallback(1337);
 
         private int _currentLineIndex = -2;
+        private int _lastActiveLineSearchIndex = -1;
+        private TimeSpan _lastActiveLineSearchPosition = TimeSpan.MinValue;
         private int _revealedWords = 0;
         private double _lineElapsed = 0.0;
         private double _ambientTime = 0.0;
+        private bool _lowLatencyMode;
+        private bool _hasTitleIntro;
+        private TimeSpan _titleIntroStartPosition;
+        private TimeSpan? _firstLyricStartPosition;
 
         private readonly TransformGroup _cameraTransformGroup;
         private readonly RotateTransform _cameraRotateTransform;
@@ -46,6 +54,7 @@ namespace LmenV2.Rendering.Kinetic
         private readonly TextBlock _titleCardTitle;
         private readonly TextBlock _titleCardArtist;
         private readonly Ellipse _titleCardDot;
+        private readonly DropShadowEffect _titleCardShadow;
         private readonly TranslateTransform _titleCardTranslate = new TranslateTransform(0, 0);
         private double _lastTitleW = -1;
         private double _lastTitleH = -1;
@@ -86,6 +95,9 @@ namespace LmenV2.Rendering.Kinetic
 
         private KineticScene? _currentScene;
         private FrameworkElement? _layoutRoot;
+        private readonly ChromaticSplitEffect _chromaticSplitEffect = new ChromaticSplitEffect();
+        private double _lastChromaticSplitAmount = -1.0;
+        private double _lastChromaticPulseStrength = -1.0;
 
         // Fisheye convex lens + vertical traversal
         private TranslateTransform? _fisheyeRiseTransform;
@@ -98,6 +110,37 @@ namespace LmenV2.Rendering.Kinetic
         private double _fisheyeRiseOffsetY;
 
         public KineticTemplate CurrentTemplateChoice => _activeTemplateChoice;
+
+        public void SetChromaticSplitEnabled(bool enabled)
+        {
+            _hostCanvas.Effect = enabled ? _chromaticSplitEffect : null;
+        }
+
+        public void SetLowLatencyMode(bool enabled)
+        {
+            if (_lowLatencyMode == enabled) return;
+            _lowLatencyMode = enabled;
+            _titleCardTitle.Effect = enabled ? null : _titleCardShadow;
+            _currentLineIndex = -2;
+        }
+
+        public void UpdateChromaticSplit(double amount, double pulseStrength)
+        {
+            amount = Math.Clamp(amount, 0.0, 0.012);
+            pulseStrength = Math.Clamp(pulseStrength, 0.0, 1.0);
+
+            if (Math.Abs(amount - _lastChromaticSplitAmount) >= 0.00001)
+            {
+                _lastChromaticSplitAmount = amount;
+                _chromaticSplitEffect.SplitAmount = amount;
+            }
+
+            if (Math.Abs(pulseStrength - _lastChromaticPulseStrength) >= 0.01)
+            {
+                _lastChromaticPulseStrength = pulseStrength;
+                _chromaticSplitEffect.PulseStrength = pulseStrength;
+            }
+        }
 
         public KineticStageRenderer(Canvas hostCanvas)
         {
@@ -160,7 +203,7 @@ namespace LmenV2.Rendering.Kinetic
                 TextAlignment = TextAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 14)
             };
-            var titleShadow = new DropShadowEffect
+            _titleCardShadow = new DropShadowEffect
             {
                 Color = Colors.Black,
                 BlurRadius = 24,
@@ -168,8 +211,8 @@ namespace LmenV2.Rendering.Kinetic
                 Opacity = 0.6,
                 RenderingBias = RenderingBias.Performance
             };
-            titleShadow.Freeze();
-            _titleCardTitle.Effect = titleShadow;
+            _titleCardShadow.Freeze();
+            _titleCardTitle.Effect = _lowLatencyMode ? null : _titleCardShadow;
 
             var artistRow = new StackPanel
             {
@@ -271,6 +314,20 @@ namespace LmenV2.Rendering.Kinetic
         public void SetLyrics(TrackLyrics? lyrics, string title, string artist, Color dominant, Color accent, string genre = "")
         {
             _lyrics = lyrics;
+            _firstLyricStartPosition = null;
+            if (lyrics?.Lines != null)
+            {
+                for (int i = 0; i < lyrics.Lines.Count; i++)
+                {
+                    var line = lyrics.Lines[i];
+                    if (line.IsGap) continue;
+                    if (!_firstLyricStartPosition.HasValue || line.StartTime < _firstLyricStartPosition.Value)
+                    {
+                        _firstLyricStartPosition = line.StartTime;
+                    }
+                }
+            }
+
             _songTitle = string.IsNullOrWhiteSpace(title) ? "Ready to Play" : title;
             _artistName = string.IsNullOrWhiteSpace(artist) ? "Play music to begin" : artist;
             _genre = genre;
@@ -287,12 +344,27 @@ namespace LmenV2.Rendering.Kinetic
             }
 
             _currentLineIndex = -2;
+            _lastActiveLineSearchIndex = -1;
+            _lastActiveLineSearchPosition = TimeSpan.MinValue;
             _revealedWords = 0;
             _activeWordElements.Clear();
             _cameraCanvas.Children.Clear();
             _activeGraphPaths.Clear();
             _layoutRoot = null;
             DetachFisheyeLens();
+        }
+
+        public void StartTitleIntro(TimeSpan playbackPosition)
+        {
+            _titleIntroStartPosition = playbackPosition;
+            _hasTitleIntro = true;
+            _titleCardPanel.Opacity = 0.0;
+            _titleCardPanel.Visibility = Visibility.Collapsed;
+        }
+
+        public void CancelTitleIntro()
+        {
+            _hasTitleIntro = false;
         }
 
         public void UpdateFrame(TimeSpan position, double dt)
@@ -312,10 +384,12 @@ namespace LmenV2.Rendering.Kinetic
                 // Ambient harmonic floating camera drift
                 double driftY = Math.Sin(_ambientTime * 0.9) * 4.0;
                 double driftX = Math.Cos(_ambientTime * 0.7) * 3.0;
+                bool showTitleIntro = IsTitleIntroActive(position);
+                UpdateTitleCard(showTitleIntro, w, h, driftX, driftY, dt);
 
                 if (_lyrics == null || !_lyrics.HasLyrics || _lyrics.Lines == null || _lyrics.Lines.Count == 0)
                 {
-                    ShowTitleCard(true, w, h, driftX, driftY);
+                    HideStage();
                     UpdateRipples(dt);
                     return;
                 }
@@ -325,34 +399,54 @@ namespace LmenV2.Rendering.Kinetic
                 // parked at the top of the stage (its rise animation was already at the
                 // clamp) for seconds while no new lyric arrived.
                 int activeLineIdx = -1;
-                for (int i = 0; i < _lyrics.Lines.Count; i++)
+                bool canReuseSearch = position >= _lastActiveLineSearchPosition &&
+                    _lastActiveLineSearchPosition != TimeSpan.MinValue;
+                if (canReuseSearch && _lastActiveLineSearchIndex >= 0 &&
+                    _lastActiveLineSearchIndex < _lyrics.Lines.Count)
                 {
-                    var l = _lyrics.Lines[i];
-                    if (l.IsGap) continue;
-
-                    if (position >= l.StartTime && position < l.EndTime)
+                    var previousLine = _lyrics.Lines[_lastActiveLineSearchIndex];
+                    if (!previousLine.IsGap &&
+                        position >= previousLine.StartTime &&
+                        position < previousLine.EndTime)
                     {
-                        activeLineIdx = i;
-                        break;
+                        activeLineIdx = _lastActiveLineSearchIndex;
+                    }
+                }
+                else if (canReuseSearch && _lastActiveLineSearchIndex == -1 &&
+                    position == _lastActiveLineSearchPosition)
+                {
+                    activeLineIdx = -1;
+                }
+
+                if (activeLineIdx == -1 &&
+                    !(canReuseSearch && _lastActiveLineSearchIndex == -1 &&
+                      position == _lastActiveLineSearchPosition))
+                {
+                    for (int i = 0; i < _lyrics.Lines.Count; i++)
+                    {
+                        var line = _lyrics.Lines[i];
+                        if (line.IsGap) continue;
+
+                        if (position >= line.StartTime && position < line.EndTime)
+                        {
+                            activeLineIdx = i;
+                            break;
+                        }
                     }
                 }
 
+                _lastActiveLineSearchIndex = activeLineIdx;
+                _lastActiveLineSearchPosition = position;
+
                 if (activeLineIdx == -1)
                 {
-                    if (ShowTitleCardForPause(position))
-                    {
-                        ShowTitleCard(true, w, h, driftX, driftY);
-                    }
-                    else
-                    {
-                        HideStage();
-                    }
+                    HideStage();
                     UpdateRipples(dt);
                     return;
                 }
 
                 // If we have an active line, hide title card and render kinetic line
-                ShowTitleCard(false, w, h, driftX, driftY);
+                _cameraCanvas.Visibility = Visibility.Visible;
 
                 if (activeLineIdx >= 0 && activeLineIdx < _lyrics.Lines.Count)
                 {
@@ -409,7 +503,7 @@ namespace LmenV2.Rendering.Kinetic
                     }
 
                     // Update word springs and layout animations
-                    UpdateWordAnimations(revealed, dt, w, h, driftX, driftY);
+                    UpdateWordAnimations(revealed, position, dt, w, h, driftX, driftY);
                 }
 
                 UpdateRipples(dt);
@@ -420,38 +514,16 @@ namespace LmenV2.Rendering.Kinetic
             }
         }
 
-        /// <summary>
-        /// Decides what fills a no-lyric moment: the full "now playing" card for the
-        /// intro, the outro, explicit instrumental breaks and long silences, or a
-        /// clean stage for the brief pauses between consecutive lyric lines.
-        /// </summary>
-        private bool ShowTitleCardForPause(TimeSpan position)
+        private bool IsTitleIntroActive(TimeSpan position)
         {
-            var lines = _lyrics?.Lines;
-            if (lines == null || lines.Count == 0) return true;
-
-            if (position < lines[0].StartTime) return true;
-
-            var last = lines[^1];
-            if (position >= last.EndTime) return true;
-
-            foreach (var line in lines)
+            if (!_hasTitleIntro) return false;
+            if (position >= _titleIntroStartPosition + TimeSpan.FromSeconds(TitleIntroDurationSeconds) ||
+                (_firstLyricStartPosition.HasValue && position >= _firstLyricStartPosition.Value))
             {
-                if (line.IsGap && position >= line.StartTime && position < line.EndTime) return true;
+                _hasTitleIntro = false;
+                return false;
             }
-
-            for (int i = 0; i < lines.Count - 1; i++)
-            {
-                var line = lines[i];
-                if (line.IsGap) continue;
-                var next = lines[i + 1];
-                if (position >= line.EndTime && position < next.StartTime)
-                {
-                    return (next.StartTime - line.EndTime).TotalSeconds > 2.8;
-                }
-            }
-
-            return false;
+            return true;
         }
 
         private void HideStage()
@@ -461,18 +533,12 @@ namespace LmenV2.Rendering.Kinetic
                 _cameraCanvas.Visibility = Visibility.Collapsed;
             }
 
-            if (_titleCardPanel.Visibility != Visibility.Collapsed)
-            {
-                _titleCardPanel.Opacity = 0.0;
-                _titleCardPanel.Visibility = Visibility.Collapsed;
-            }
-
             // The next line must rebuild from scratch rather than replay the finished
             // scene's cached (already-risen) layout.
             _currentLineIndex = -2;
         }
 
-        private void ShowTitleCard(bool show, double w, double h, double driftX, double driftY)
+        private void UpdateTitleCard(bool show, double w, double h, double driftX, double driftY, double dt)
         {
             if (show)
             {
@@ -480,7 +546,6 @@ namespace LmenV2.Rendering.Kinetic
                 {
                     _titleCardPanel.Visibility = Visibility.Visible;
                 }
-                _titleCardPanel.Opacity = Math.Min(1.0, _titleCardPanel.Opacity + 0.08);
 
                 if (Math.Abs(w - _lastTitleW) > 1.0 || Math.Abs(h - _lastTitleH) > 1.0 || _titleNeedsMeasure)
                 {
@@ -502,24 +567,15 @@ namespace LmenV2.Rendering.Kinetic
                     _cameraCanvas.Visibility = Visibility.Collapsed;
                 }
 
-                // Title card covers the stage: drop the fisheye lens so it is not
-                // left bound to a hidden canvas when the next line is built.
                 DetachFisheyeLens();
             }
-            else
+
+            double blend = 1.0 - Math.Exp(-Math.Max(0.0, dt) / 0.12);
+            _titleCardPanel.Opacity += ((show ? 1.0 : 0.0) - _titleCardPanel.Opacity) * blend;
+            if (!show && _titleCardPanel.Opacity <= 0.01)
             {
-                if (_titleCardPanel.Opacity > 0.01)
-                {
-                    _titleCardPanel.Opacity = Math.Max(0.0, _titleCardPanel.Opacity - 0.12);
-                    if (_titleCardPanel.Opacity <= 0.01)
-                    {
-                        _titleCardPanel.Visibility = Visibility.Collapsed;
-                    }
-                }
-                if (_cameraCanvas.Visibility != Visibility.Visible)
-                {
-                    _cameraCanvas.Visibility = Visibility.Visible;
-                }
+                _titleCardPanel.Opacity = 0.0;
+                _titleCardPanel.Visibility = Visibility.Collapsed;
             }
         }
 
@@ -549,7 +605,6 @@ namespace LmenV2.Rendering.Kinetic
 
             if (words == null || words.Count == 0)
             {
-                ShowTitleCard(true, stageW, stageH, 0, 0);
                 return;
             }
 
@@ -596,10 +651,10 @@ namespace LmenV2.Rendering.Kinetic
         {
             var list = new List<LyricWord>();
             if (string.IsNullOrWhiteSpace(text)) return list;
-            var parts = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var p in parts)
+            var parts = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < parts.Length; i++)
             {
-                list.Add(new LyricWord { Text = p });
+                list.Add(new LyricWord { Text = parts[i], HasSpaceAfter = i < parts.Length - 1 });
             }
             return list;
         }
@@ -638,7 +693,7 @@ namespace LmenV2.Rendering.Kinetic
                     bool isHigh = highlights.Contains(i);
                     Color col = isHigh ? _palette.Accents[(seed >> 3) % 3] : Colors.White;
 
-                    var elem = CreateWordElement(w.Text, baseFontSize, col, isHigh, KineticTemplate.Stack);
+                    var elem = CreateWordElement(w, baseFontSize, col, isHigh, KineticTemplate.Stack);
                     // Entrance: slide up from +0.7em with scale
                     elem.TranslateYSpring = KineticSpring.Create(baseFontSize * 0.70, 150.0, 24.5);
                     elem.ScaleYSpring = KineticSpring.Create(1.30, 150.0, 24.5);
@@ -688,7 +743,7 @@ namespace LmenV2.Rendering.Kinetic
                     bool isHigh = highlights.Contains(i);
                     Color col = isHigh ? _palette.Accents[(seed >> 3) % 3] : Colors.White;
 
-                    var elem = CreateWordElement(w.Text, baseFontSize, col, isHigh, KineticTemplate.Slide);
+                    var elem = CreateWordElement(w, baseFontSize, col, isHigh, KineticTemplate.Slide);
                     // Slide horizontally from edge with skew
                     elem.TranslateXSpring = KineticSpring.Create(fromLeft ? -stageW * 0.15 : stageW * 0.25, 120.0, 22.0);
                     elem.SkewX = fromLeft ? -10.0 : 16.0;
@@ -735,7 +790,7 @@ namespace LmenV2.Rendering.Kinetic
                     bool isHigh = highlights.Contains(i);
                     Color col = isHigh ? _palette.Accents[(seed >> 3) % 3] : Colors.White;
 
-                    var elem = CreateWordElement(w.Text, baseFontSize, col, isHigh, KineticTemplate.Zoom);
+                    var elem = CreateWordElement(w, baseFontSize, col, isHigh, KineticTemplate.Zoom);
                     // Zoom entrance: flies in from huge scale (2.6x)
                     elem.ScaleXSpring = KineticSpring.Create(2.6, 90.0, 18.0);
                     elem.ScaleYSpring = KineticSpring.Create(1.95, 90.0, 18.0);
@@ -784,7 +839,7 @@ namespace LmenV2.Rendering.Kinetic
                     bool isHigh = highlights.Contains(i);
                     Color col = isHigh ? _palette.Accents[(seed >> 3) % 3] : Colors.White;
 
-                    var elem = CreateLettersElement(w.Text, baseFontSize, col, isHigh, fromTop);
+                    var elem = CreateLettersElement(w, baseFontSize, col, isHigh, fromTop);
                     _activeWordElements.Add(elem);
                     rowPanel.Children.Add(elem.Container);
                 }
@@ -822,13 +877,15 @@ namespace LmenV2.Rendering.Kinetic
                 double fromX = (rng() - 0.5) * stageW * 0.20;
                 double fromY = (rng() - 0.5) * stageH * 0.15;
 
-                var elem = CreateWordElement(w.Text, fontSize, col, isHigh, KineticTemplate.Scatter);
+                var elem = CreateWordElement(w, fontSize, col, isHigh, KineticTemplate.Scatter);
                 elem.TranslateXSpring = KineticSpring.Create(fromX, 140.0, 23.0);
                 elem.TranslateYSpring = KineticSpring.Create(fromY + offsetY, 140.0, 23.0);
                 elem.ScaleXSpring = KineticSpring.Create(0.65, 140.0, 23.0);
                 elem.ScaleYSpring = KineticSpring.Create(0.65, 140.0, 23.0);
                 elem.OpacitySpring = KineticSpring.Create(0.0, 160.0, 24.0);
-                elem.Container.Margin = new Thickness(baseFontSize * 0.18, baseFontSize * 0.10, baseFontSize * 0.18, baseFontSize * 0.10);
+                elem.Container.Margin = new Thickness(0, baseFontSize * 0.10,
+                    w.HasSpaceAfter ? KineticLayout.WordSpaceWidth(elem.TextBlock.FontFamily, elem.TextBlock.FontWeight, fontSize) : 0,
+                    baseFontSize * 0.10);
 
                 _activeWordElements.Add(elem);
                 wrapPanel.Children.Add(elem.Container);
@@ -866,7 +923,8 @@ namespace LmenV2.Rendering.Kinetic
                 bool isLeaf = (clean.Length <= 2 || clean == "the" || clean == "to" || clean == "of" || clean == "in" || clean == "on" || clean == "my");
 
                 double fontSize = isLeaf ? leafFont : trunkFont;
-                var elem = CreateWordElement(w.Text, fontSize, col, isHigh, KineticTemplate.Graph);
+                var elem = CreateWordElement(w, fontSize, col, isHigh, KineticTemplate.Graph);
+                elem.Container.Margin = new Thickness(0);
 
                 double wordW = KineticLayout.VisualLength(w.Text) * fontSize;
                 double targetX = curX;
@@ -887,7 +945,9 @@ namespace LmenV2.Rendering.Kinetic
                 _activeWordElements.Add(elem);
                 graphCanvas.Children.Add(elem.Container);
 
-                curX += wordW + trunkFont * 0.45;
+                curX += wordW + (w.HasSpaceAfter
+                    ? KineticLayout.WordSpaceWidth(elem.TextBlock.FontFamily, elem.TextBlock.FontWeight, fontSize)
+                    : 0.0);
                 if (curX > stageW * 0.75 && i < words.Count - 2)
                 {
                     curX = stageW * 0.05;
@@ -962,7 +1022,7 @@ namespace LmenV2.Rendering.Kinetic
                     bool isHigh = highlights.Contains(i);
                     Color col = isHigh ? _palette.Accents[(seed >> 3) % 3] : Colors.White;
 
-                    var elem = CreateWordElement(w.Text, baseFontSize, col, isHigh, KineticTemplate.Flow);
+                    var elem = CreateWordElement(w, baseFontSize, col, isHigh, KineticTemplate.Flow);
                     // Flow layout: all words visible at 0.32 opacity, lights up to 1.0 when sung
                     elem.Container.Opacity = 0.32;
                     elem.TargetOpacity = 0.32;
@@ -1027,11 +1087,11 @@ namespace LmenV2.Rendering.Kinetic
                     KineticWordElement elem;
                     if (kind < 0.42)
                     {
-                        elem = CreateStickerGlossElement(w.Text, baseFontSize * (0.96 + rng() * 0.20), isHigh ? pink : red, isHigh);
+                        elem = CreateStickerGlossElement(w, baseFontSize * (0.96 + rng() * 0.20), isHigh ? pink : red, isHigh);
                     }
                     else
                     {
-                        elem = CreateStickerBlockElement(w.Text, baseFontSize, stickerTint, Colors.White, isHigh);
+                        elem = CreateStickerBlockElement(w, baseFontSize, stickerTint, Colors.White, isHigh);
                     }
 
                     elem.BaseRotation = rotation;
@@ -1122,7 +1182,14 @@ namespace LmenV2.Rendering.Kinetic
             int maxRows = Math.Min(3, Math.Max(1, (int)Math.Ceiling(words.Count / 3.0)));
             var rows = KineticLayout.GroupRows(words, maxRows);
 
-            double baseFontSize = FitFontToRows(rows, stageW * 0.76, stageH * 0.52, 28.0, 96.0);
+            double baseFontSize = FitFontToRows(
+                rows,
+                stageW * 0.76,
+                stageH * 0.52,
+                28.0,
+                96.0,
+                "Segoe UI, Inter",
+                FontWeights.Bold);
 
             var root = new StackPanel
             {
@@ -1159,15 +1226,19 @@ namespace LmenV2.Rendering.Kinetic
 
                     var tb = new TextBlock
                     {
-                        Text = w.Text.ToUpperInvariant(),
                         FontFamily = new FontFamily("Segoe UI, Inter"),
                         FontWeight = FontWeights.Bold,
                         FontSize = baseFontSize,
                         Foreground = new SolidColorBrush(wordColor),
+                        TextWrapping = TextWrapping.NoWrap,
                         RenderTransform = tg,
                         RenderTransformOrigin = new Point(0.5, 0.5),
-                        Margin = new Thickness(baseFontSize * 0.09, 0, baseFontSize * 0.09, 0),
-                        Effect = DefaultWordShadow,
+                        Margin = new Thickness(0, 0,
+                            w.HasSpaceAfter
+                                ? KineticLayout.WordSpaceWidth(new FontFamily("Segoe UI, Inter"), FontWeights.Bold, baseFontSize)
+                                : 0,
+                            0),
+                        Effect = _lowLatencyMode ? null : DefaultWordShadow,
                         Opacity = 0.35
                     };
 
@@ -1191,6 +1262,7 @@ namespace LmenV2.Rendering.Kinetic
                         LensBaseOffsetY = (r - (rows.Count - 1) * 0.5) * baseFontSize * 1.32
                     };
 
+                    ConfigureSyllableText(tb, elem, w);
                     _activeWordElements.Add(elem);
                     rowPanel.Children.Add(tb);
 
@@ -1276,7 +1348,7 @@ namespace LmenV2.Rendering.Kinetic
             }
         }
 
-        private KineticWordElement CreateStickerBlockElement(string text, double fontSize, Color blockColor, Color textColor, bool isHighlighted)
+        private KineticWordElement CreateStickerBlockElement(LyricWord word, double fontSize, Color blockColor, Color textColor, bool isHighlighted)
         {
             var scale = new ScaleTransform(1, 1);
             var translate = new TranslateTransform(0, 0);
@@ -1291,11 +1363,11 @@ namespace LmenV2.Rendering.Kinetic
 
             var tb = new TextBlock
             {
-                Text = text.ToUpperInvariant(),
                 FontFamily = new FontFamily("Segoe UI, Inter, Arial Black"),
                 FontWeight = FontWeights.Black,
                 FontSize = fontSize,
                 Foreground = new SolidColorBrush(textColor),
+                TextWrapping = TextWrapping.NoWrap,
                 TextAlignment = TextAlignment.Center
             };
 
@@ -1307,12 +1379,16 @@ namespace LmenV2.Rendering.Kinetic
                 Child = tb,
                 RenderTransform = tg,
                 RenderTransformOrigin = new Point(0.5, 0.5),
-                Margin = new Thickness(fontSize * 0.14, 0, fontSize * 0.14, 0),
-                Effect = DefaultWordShadow,
+                Margin = new Thickness(0, 0,
+                    word.HasSpaceAfter
+                        ? KineticLayout.WordSpaceWidth(new FontFamily("Segoe UI, Inter, Arial Black"), FontWeights.Black, fontSize)
+                        : 0,
+                    0),
+                Effect = _lowLatencyMode ? null : DefaultWordShadow,
                 Opacity = 0.42
             };
 
-            return new KineticWordElement
+            var element = new KineticWordElement
             {
                 Container = block,
                 TextBlock = tb,
@@ -1330,9 +1406,11 @@ namespace LmenV2.Rendering.Kinetic
                 HighlightColor = blockColor,
                 Template = KineticTemplate.Sticker
             };
+            ConfigureSyllableText(tb, element, word);
+            return element;
         }
 
-        private KineticWordElement CreateStickerGlossElement(string text, double fontSize, Color color, bool isHighlighted)
+        private KineticWordElement CreateStickerGlossElement(LyricWord word, double fontSize, Color color, bool isHighlighted)
         {
             var scale = new ScaleTransform(1, 1);
             var translate = new TranslateTransform(0, 0);
@@ -1347,29 +1425,36 @@ namespace LmenV2.Rendering.Kinetic
 
             var tb = new TextBlock
             {
-                Text = text.ToUpperInvariant(),
                 FontFamily = new FontFamily("Segoe UI, Inter, Arial Black"),
                 FontWeight = FontWeights.Black,
                 FontSize = fontSize,
                 Foreground = CreateGlossBrush(color),
+                TextWrapping = TextWrapping.NoWrap,
                 RenderTransform = tg,
                 RenderTransformOrigin = new Point(0.5, 0.5),
-                Margin = new Thickness(fontSize * 0.10, 0, fontSize * 0.10, 0),
+                Margin = new Thickness(0, 0,
+                    word.HasSpaceAfter
+                        ? KineticLayout.WordSpaceWidth(new FontFamily("Segoe UI, Inter, Arial Black"), FontWeights.Black, fontSize)
+                        : 0,
+                    0),
                 Opacity = 0.42
             };
 
-            var halo = new DropShadowEffect
+            if (!_lowLatencyMode)
             {
-                Color = color,
-                BlurRadius = isHighlighted ? 24.0 : 14.0,
-                ShadowDepth = 0.0,
-                Opacity = isHighlighted ? 0.75 : 0.50,
-                RenderingBias = RenderingBias.Performance
-            };
-            halo.Freeze();
-            tb.Effect = halo;
+                var halo = new DropShadowEffect
+                {
+                    Color = color,
+                    BlurRadius = isHighlighted ? 24.0 : 14.0,
+                    ShadowDepth = 0.0,
+                    Opacity = isHighlighted ? 0.75 : 0.50,
+                    RenderingBias = RenderingBias.Performance
+                };
+                halo.Freeze();
+                tb.Effect = halo;
+            }
 
-            return new KineticWordElement
+            var element = new KineticWordElement
             {
                 Container = tb,
                 TextBlock = tb,
@@ -1387,6 +1472,8 @@ namespace LmenV2.Rendering.Kinetic
                 HighlightColor = color,
                 Template = KineticTemplate.Sticker
             };
+            ConfigureSyllableText(tb, element, word);
+            return element;
         }
 
         private static LinearGradientBrush CreateGlossBrush(Color baseColor)
@@ -1518,6 +1605,12 @@ namespace LmenV2.Rendering.Kinetic
             public bool IsHighlighted;
             public Color HighlightColor;
             public KineticTemplate Template;
+            public List<Run>? SyllableRuns;
+            public List<LyricSyllable>? Syllables;
+            public List<int>? LetterSyllableIndices;
+            public System.Windows.Media.Brush? BaseSyllableBrush;
+            public System.Windows.Media.Brush? ActiveSyllableBrush;
+            public System.Windows.Media.Brush? SungSyllableBrush;
 
             // Sticker mode support (seeded tilt + per-frame wobble)
             public double BaseRotation;
@@ -1532,7 +1625,7 @@ namespace LmenV2.Rendering.Kinetic
             public List<KineticSpring>? LetterRotateXSprings;
         }
 
-        private KineticWordElement CreateWordElement(string text, double fontSize, Color color, bool isHighlighted, KineticTemplate template)
+        private KineticWordElement CreateWordElement(LyricWord word, double fontSize, Color color, bool isHighlighted, KineticTemplate template)
         {
             var scale = new ScaleTransform(1, 1);
             var translate = new TranslateTransform(0, 0);
@@ -1547,18 +1640,22 @@ namespace LmenV2.Rendering.Kinetic
 
             var tb = new TextBlock
             {
-                Text = text.ToUpperInvariant(),
                 FontFamily = new FontFamily("Segoe UI, Inter, Arial Black"),
                 FontWeight = FontWeights.Black,
                 FontSize = fontSize,
                 Foreground = new SolidColorBrush(color),
+                TextWrapping = TextWrapping.NoWrap,
                 RenderTransform = tg,
                 RenderTransformOrigin = new Point(0.5, 0.5),
-                Margin = new Thickness(fontSize * 0.12, 0, fontSize * 0.12, 0)
+                Margin = new Thickness(0, 0,
+                    word.HasSpaceAfter
+                        ? KineticLayout.WordSpaceWidth(new FontFamily("Segoe UI, Inter, Arial Black"), FontWeights.Black, fontSize)
+                        : 0,
+                    0)
             };
 
             // Deep drop shadow + glowing accent halo if highlighted
-            if (isHighlighted)
+            if (isHighlighted && !_lowLatencyMode)
             {
                 var halo = new DropShadowEffect
                 {
@@ -1571,7 +1668,7 @@ namespace LmenV2.Rendering.Kinetic
                 halo.Freeze();
                 tb.Effect = halo;
             }
-            else
+            else if (!_lowLatencyMode)
             {
                 tb.Effect = DefaultWordShadow;
             }
@@ -1594,23 +1691,98 @@ namespace LmenV2.Rendering.Kinetic
                 Template = template
             };
 
+            ConfigureSyllableText(tb, elem, word);
             return elem;
         }
 
-        private KineticWordElement CreateLettersElement(string text, double fontSize, Color color, bool isHighlighted, bool fromTop)
+        private void ConfigureSyllableText(TextBlock textBlock, KineticWordElement element, LyricWord word)
         {
-            var letters = KineticLayout.SplitLetters(text.ToUpperInvariant());
+            string text = word.Text ?? string.Empty;
+            if (word.Syllables == null || word.Syllables.Count < 2 || text.Length == 0)
+            {
+                textBlock.Text = text.ToUpperInvariant();
+                return;
+            }
+
+            textBlock.Inlines.Clear();
+            var baseBrush = textBlock.Foreground ?? Brushes.White;
+            var activeBrush = new SolidColorBrush(_palette.Accents[1]);
+            var sungBrush = new SolidColorBrush(_palette.Accents[0]);
+            activeBrush.Freeze();
+            sungBrush.Freeze();
+
+            var runs = new List<Run>(word.Syllables.Count);
+            var syllables = new List<LyricSyllable>(word.Syllables.Count);
+            int cursor = 0;
+            for (int i = 0; i < word.Syllables.Count; i++)
+            {
+                var syllable = word.Syllables[i];
+                int start = Math.Clamp(Math.Max(cursor, syllable.StartChar), 0, text.Length);
+                int end = Math.Clamp(syllable.EndChar, start, text.Length);
+
+                if (start > cursor)
+                {
+                    textBlock.Inlines.Add(new Run(text.Substring(cursor, start - cursor).ToUpperInvariant())
+                    {
+                        Foreground = baseBrush
+                    });
+                }
+
+                if (end > start)
+                {
+                    var run = new Run(text.Substring(start, end - start).ToUpperInvariant())
+                    {
+                        Foreground = baseBrush
+                    };
+                    textBlock.Inlines.Add(run);
+                    runs.Add(run);
+                    syllables.Add(syllable);
+                    cursor = end;
+                }
+            }
+
+            if (cursor < text.Length)
+            {
+                textBlock.Inlines.Add(new Run(text.Substring(cursor).ToUpperInvariant())
+                {
+                    Foreground = baseBrush
+                });
+            }
+
+            if (runs.Count == 0)
+            {
+                textBlock.Inlines.Clear();
+                textBlock.Text = text.ToUpperInvariant();
+                return;
+            }
+
+            element.SyllableRuns = runs;
+            element.Syllables = syllables;
+            element.BaseSyllableBrush = baseBrush;
+            element.ActiveSyllableBrush = activeBrush;
+            element.SungSyllableBrush = sungBrush;
+        }
+
+        private KineticWordElement CreateLettersElement(LyricWord word, double fontSize, Color color, bool isHighlighted, bool fromTop)
+        {
+            var letters = KineticLayout.SplitLetters(word.Text);
             var letterPanel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Margin = new Thickness(fontSize * 0.12, 0, fontSize * 0.12, 0)
+                Margin = new Thickness(0, 0,
+                    word.HasSpaceAfter
+                        ? KineticLayout.WordSpaceWidth(new FontFamily("Segoe UI, Inter, Arial Black"), FontWeights.Black, fontSize)
+                        : 0,
+                    0)
             };
 
             var letterBlocks = new List<TextBlock>();
             var springs = new List<KineticSpring>();
+            var syllableIndices = new List<int>(letters.Count);
+            int charOffset = 0;
 
             // Single frozen drop shadow on the word's letter panel instead of per-letter
-            if (isHighlighted)
+            if (isHighlighted && !_lowLatencyMode)
             {
                 var halo = new DropShadowEffect
                 {
@@ -1623,7 +1795,7 @@ namespace LmenV2.Rendering.Kinetic
                 halo.Freeze();
                 letterPanel.Effect = halo;
             }
-            else
+            else if (!_lowLatencyMode)
             {
                 letterPanel.Effect = DefaultWordShadow;
             }
@@ -1633,7 +1805,7 @@ namespace LmenV2.Rendering.Kinetic
                 var scale = new ScaleTransform(1, 1);
                 var tb = new TextBlock
                 {
-                    Text = ch,
+                    Text = ch.ToUpperInvariant(),
                     FontFamily = new FontFamily("Segoe UI, Inter, Arial Black"),
                     FontWeight = FontWeights.Black,
                     FontSize = fontSize,
@@ -1646,6 +1818,8 @@ namespace LmenV2.Rendering.Kinetic
                 // Flip in scaleY from 0 to 1
                 springs.Add(KineticSpring.Create(0.0, 160.0, 22.0));
                 letterPanel.Children.Add(tb);
+                syllableIndices.Add(FindSyllableIndex(word.Syllables, charOffset));
+                charOffset += ch.Length;
             }
 
             var elem = new KineticWordElement
@@ -1664,19 +1838,60 @@ namespace LmenV2.Rendering.Kinetic
                 OpacitySpring = KineticSpring.Create(0.0),
                 IsHighlighted = isHighlighted,
                 HighlightColor = color,
-                Template = KineticTemplate.Letters
+                Template = KineticTemplate.Letters,
+                Syllables = word.Syllables,
+                LetterSyllableIndices = syllableIndices
             };
 
             return elem;
         }
 
-        private void UpdateWordAnimations(int revealed, double dt, double stageW, double stageH, double driftX, double driftY)
+        private static int FindSyllableIndex(List<LyricSyllable>? syllables, int charOffset)
+        {
+            if (syllables == null) return -1;
+            for (int i = 0; i < syllables.Count; i++)
+            {
+                if (charOffset >= syllables[i].StartChar && charOffset < syllables[i].EndChar) return i;
+            }
+            return -1;
+        }
+
+        private static void UpdateSyllableRuns(KineticWordElement element, double positionMs)
+        {
+            if (element.SyllableRuns == null ||
+                element.Syllables == null ||
+                element.BaseSyllableBrush == null ||
+                element.ActiveSyllableBrush == null ||
+                element.SungSyllableBrush == null)
+            {
+                return;
+            }
+
+            int count = Math.Min(element.SyllableRuns.Count, element.Syllables.Count);
+            for (int i = 0; i < count; i++)
+            {
+                var syllable = element.Syllables[i];
+                System.Windows.Media.Brush brush = positionMs >= syllable.EndMs
+                    ? element.SungSyllableBrush
+                    : positionMs >= syllable.StartMs
+                        ? element.ActiveSyllableBrush
+                        : element.BaseSyllableBrush;
+                if (!ReferenceEquals(element.SyllableRuns[i].Foreground, brush))
+                {
+                    element.SyllableRuns[i].Foreground = brush;
+                }
+            }
+        }
+
+        private void UpdateWordAnimations(int revealed, TimeSpan position, double dt, double stageW, double stageH, double driftX, double driftY)
         {
             for (int i = 0; i < _activeWordElements.Count; i++)
             {
                 var elem = _activeWordElements[i];
                 bool isSung = i < revealed;
                 bool isActive = i == revealed - 1;
+                double positionMs = position.TotalMilliseconds;
+                UpdateSyllableRuns(elem, positionMs);
 
                 if (elem.Template == KineticTemplate.Flow)
                 {
@@ -1695,7 +1910,16 @@ namespace LmenV2.Rendering.Kinetic
                             for (int j = 0; j < elem.LetterRotateXSprings.Count; j++)
                             {
                                 var s = elem.LetterRotateXSprings[j];
-                                s.Target = 1.0;
+                                int syllableIndex = elem.LetterSyllableIndices != null &&
+                                    j < elem.LetterSyllableIndices.Count
+                                    ? elem.LetterSyllableIndices[j]
+                                    : -1;
+                                bool letterSung = elem.Syllables != null &&
+                                    syllableIndex >= 0 &&
+                                    syllableIndex < elem.Syllables.Count
+                                    ? positionMs >= elem.Syllables[syllableIndex].StartMs
+                                    : isSung;
+                                s.Target = letterSung ? 1.0 : 0.0;
                                 s.Update(dt);
                                 elem.LetterRotateXSprings[j] = s;
 
@@ -1827,13 +2051,21 @@ namespace LmenV2.Rendering.Kinetic
             return t * t * (3.0 - 2.0 * t);
         }
 
-        private double FitFontToRows(List<List<LyricWord>> rows, double maxW, double maxH, double minFont, double maxFont)
+        private double FitFontToRows(
+            List<List<LyricWord>> rows,
+            double maxW,
+            double maxH,
+            double minFont,
+            double maxFont,
+            string fontFamilyName = "Segoe UI, Inter, Arial Black",
+            FontWeight? fontWeight = null)
         {
             double longestEm = 0.5;
+            var fontFamily = new FontFamily(fontFamilyName);
+            double wordSpaceWidth = KineticLayout.WordSpaceWidth(fontFamily, fontWeight ?? FontWeights.Black, 1.0);
             foreach (var r in rows)
             {
-                double rowLen = 0;
-                foreach (var w in r) rowLen += KineticLayout.VisualLength(w.Text) + 0.25;
+                double rowLen = KineticLayout.RowVisualLength(r, wordSpaceWidth);
                 if (rowLen > longestEm) longestEm = rowLen;
             }
 

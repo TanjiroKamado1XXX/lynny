@@ -49,6 +49,7 @@ namespace LmenV2.Rendering
         private double _halfBeam = 1650.0;
         private double _phase;
         private double _overallOpacity = 1.0;
+        private bool _isEnabled = true;
 
         private Color _current;
         private Color _target;
@@ -56,7 +57,7 @@ namespace LmenV2.Rendering
 
         public EdgeBeam(Panel host)
         {
-            _current = Color.FromRgb(220, 20, 60);
+            _current = Color.FromRgb(101, 72, 245);
             _target = _current;
 
             for (int e = 0; e < 4; e++)
@@ -203,6 +204,17 @@ namespace LmenV2.Rendering
 
         public Color CurrentColor => _current;
 
+        public void SetEnabled(bool enabled)
+        {
+            if (_isEnabled == enabled) return;
+            _isEnabled = enabled;
+            if (!enabled)
+            {
+                _overallOpacity = 0.0;
+                UpdateBeamMasks();
+            }
+        }
+
         /// <summary>
         /// Updates the glow geometry when window dimensions or GlowSpread setting changes.
         /// </summary>
@@ -260,13 +272,16 @@ namespace LmenV2.Rendering
                 return;
             }
 
-            double[] edgeStarts = { 0.0, _width, _width + _height, 2.0 * _width + _height };
-            double[] edgeLens = { _width, _height, _width, _height };
-
             for (int e = 0; e < 4; e++)
             {
-                double eStart = edgeStarts[e];
-                double eLen = edgeLens[e];
+                double eStart = e switch
+                {
+                    0 => 0.0,
+                    1 => _width,
+                    2 => _width + _height,
+                    _ => (2.0 * _width) + _height
+                };
+                double eLen = (e == 0 || e == 2) ? _width : _height;
 
                 for (int st = 0; st < StopsPerEdge; st++)
                 {
@@ -380,6 +395,13 @@ namespace LmenV2.Rendering
         /// </summary>
         public void Render(double brightness, double breath, double energy)
         {
+            if (!_isEnabled)
+            {
+                _overallOpacity = 0.0;
+                UpdateBeamMasks();
+                return;
+            }
+
             // Modulation: breathing cycle (energized by kicks) + dynamic music energy boost
             double breathMod = 1.0 + (0.35 * (breath - 0.5) * 2.0);
             double musicMod = 1.0 + (0.75 * energy);
